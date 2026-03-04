@@ -3,6 +3,7 @@ services:
     build: .
     container_name: cloudtalk-etl
     restart: unless-stopped
+    init: true
     environment:
       - CLOUDTALK_API_KEY_ID=${CLOUDTALK_API_KEY_ID}
       - CLOUDTALK_API_KEY_SECRET=${CLOUDTALK_API_KEY_SECRET}

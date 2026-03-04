@@ -3,6 +3,7 @@ services:
     build: .
     container_name: cloudtalk-etl
     restart: unless-stopped
+    init: true
     env_file:
       - .env
     environment:
