@@ -32,4 +32,8 @@ def sample_raw_call() -> dict:
             "name": "Test Customer",
             "company": "ACME d.o.o.",
         },
+        "Agent": {
+            "id": "42",
+            "fullname": "Jane Doe",
+        },
     }

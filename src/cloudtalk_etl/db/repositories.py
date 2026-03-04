@@ -22,7 +22,8 @@ def upsert_calls(conn: psycopg.Connection, calls: list[dict]) -> int:
             is_voicemail, is_redirected, redirected_from, user_id,
             started_at, answered_at, ended_at, recording_link,
             call_status, call_date,
-            contact_id, contact_name, contact_company, synced_at
+            contact_id, contact_name, contact_company,
+            agent_id, agent_name, synced_at
         ) VALUES (
             %(id)s, %(call_type)s, %(billsec)s, %(talking_time)s,
             %(waiting_time)s, %(wrapup_time)s, %(public_external)s,
@@ -30,7 +31,8 @@ def upsert_calls(conn: psycopg.Connection, calls: list[dict]) -> int:
             %(is_voicemail)s, %(is_redirected)s, %(redirected_from)s,
             %(user_id)s, %(started_at)s, %(answered_at)s, %(ended_at)s,
             %(recording_link)s, %(call_status)s, %(call_date)s,
-            %(contact_id)s, %(contact_name)s, %(contact_company)s, NOW()
+            %(contact_id)s, %(contact_name)s, %(contact_company)s,
+            %(agent_id)s, %(agent_name)s, NOW()
         )
         ON CONFLICT (id) DO UPDATE SET
             call_type = EXCLUDED.call_type,
@@ -47,6 +49,8 @@ def upsert_calls(conn: psycopg.Connection, calls: list[dict]) -> int:
             contact_id = EXCLUDED.contact_id,
             contact_name = EXCLUDED.contact_name,
             contact_company = EXCLUDED.contact_company,
+            agent_id = EXCLUDED.agent_id,
+            agent_name = EXCLUDED.agent_name,
             synced_at = NOW()
     """
 

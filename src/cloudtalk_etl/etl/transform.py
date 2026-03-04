@@ -41,6 +41,7 @@ def transform_calls(raw_calls: list[dict], sync_date: date) -> list[dict]:
     for record in raw_calls:
         cdr = record.get("Cdr", {})
         contact = record.get("Contact", {})
+        agent = record.get("Agent", {})
 
         answered_at = parse_timestamp(cdr.get("answered_at"))
         call_status = "answered" if answered_at else "missed"
@@ -70,7 +71,7 @@ def transform_calls(raw_calls: list[dict], sync_date: date) -> list[dict]:
             "is_redirected": bool(cdr.get("is_redirected", False)
                                   if cdr.get("is_redirected") != "0" else False),
             "redirected_from": cdr.get("redirected_from") or None,
-            "user_id": str(cdr.get("user_id", "")) or None,
+            "user_id": str(cdr.get("user_id")) if cdr.get("user_id") is not None else None,
             "started_at": started_at,
             "answered_at": answered_at,
             "ended_at": parse_timestamp(cdr.get("ended_at")),
@@ -80,6 +81,8 @@ def transform_calls(raw_calls: list[dict], sync_date: date) -> list[dict]:
             "contact_id": str(contact.get("id", "")) or None,
             "contact_name": contact.get("name") or None,
             "contact_company": contact.get("company") or None,
+            "agent_id": str(agent.get("id")) if agent.get("id") is not None else None,
+            "agent_name": agent.get("fullname") or None if agent.get("id") is not None else None,
         })
 
     logger.info("calls_transformed", count=len(transformed))

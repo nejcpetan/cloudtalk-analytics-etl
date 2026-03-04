@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS calls (
     contact_id          TEXT,
     contact_name        TEXT,
     contact_company     TEXT,
+    agent_id            TEXT,
+    agent_name          TEXT,
     synced_at           TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -37,6 +39,10 @@ CREATE INDEX IF NOT EXISTS idx_calls_user_id ON calls (user_id);
 CREATE INDEX IF NOT EXISTS idx_calls_call_type ON calls (call_type);
 CREATE INDEX IF NOT EXISTS idx_calls_call_status ON calls (call_status);
 CREATE INDEX IF NOT EXISTS idx_calls_started_at ON calls (started_at);
+
+-- Migrations: add columns that may not exist in older deployments
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS agent_id   TEXT;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS agent_name TEXT;
 
 -- Agents table: one row per agent per sync date
 CREATE TABLE IF NOT EXISTS agents (

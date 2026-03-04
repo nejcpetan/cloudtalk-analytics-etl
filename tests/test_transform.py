@@ -95,6 +95,23 @@ def test_transform_calls_basic(sample_raw_call):
     assert row["recorded"] is True
     assert row["is_voicemail"] is False
     assert row["is_redirected"] is False
+    assert row["agent_id"] == "42"
+    assert row["agent_name"] == "Jane Doe"
+
+
+def test_transform_calls_missing_agent_becomes_none():
+    raw = [{"Cdr": {"id": "7", "type": "incoming"}}]
+    result = transform_calls(raw, SYNC_DATE)
+    assert result[0]["agent_id"] is None
+    assert result[0]["agent_name"] is None
+
+
+def test_transform_calls_null_agent_id_becomes_none():
+    raw = [{"Cdr": {"id": "8", "type": "incoming"},
+            "Agent": {"id": None, "fullname": "(unknown)"}}]
+    result = transform_calls(raw, SYNC_DATE)
+    assert result[0]["agent_id"] is None
+    assert result[0]["agent_name"] is None
 
 
 def test_transform_calls_derives_missed_status():
@@ -112,6 +129,15 @@ def test_transform_calls_handles_missing_contact():
     assert result[0]["contact_name"] is None
     assert result[0]["contact_company"] is None
     assert result[0]["contact_id"] is None
+    assert result[0]["agent_id"] is None
+    assert result[0]["agent_name"] is None
+
+
+def test_transform_calls_none_user_id_becomes_none():
+    """user_id=None from API must be stored as SQL NULL, not the string 'None'."""
+    raw = [{"Cdr": {"id": "9", "type": "incoming", "user_id": None}}]
+    result = transform_calls(raw, SYNC_DATE)
+    assert result[0]["user_id"] is None
 
 
 def test_transform_calls_is_redirected_string_zero():
