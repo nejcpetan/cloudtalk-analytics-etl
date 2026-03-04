@@ -16,13 +16,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install dependencies first (layer caching)
+# Copy everything needed to build and install the package
 COPY pyproject.toml ./
+COPY src/ ./src/
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir .
 
-# Copy source code
-COPY src/ ./src/
 COPY scripts/ ./scripts/
 
 # Create crontab entrypoint
