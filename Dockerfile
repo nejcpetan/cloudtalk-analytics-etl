@@ -26,7 +26,8 @@ COPY scripts/ ./scripts/
 
 # Create crontab entrypoint
 COPY scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Strip Windows CRLF line endings (if committed from Windows) and make executable
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # Create log directory
 RUN mkdir -p /app/logs && chown etl:etl /app/logs

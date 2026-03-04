@@ -8,7 +8,7 @@ echo "Schedule: ${CRON_SCHEDULE}"
 echo "Log level: ${LOG_LEVEL:-INFO}"
 
 # Generate crontab from environment variable
-echo "${CRON_SCHEDULE} python -m cloudtalk_etl" > /tmp/crontab
+echo "${CRON_SCHEDULE} /usr/local/bin/python -m cloudtalk_etl" > /tmp/crontab
 
 # If first argument is "run", execute ETL immediately (for testing / manual trigger)
 if [ "$1" = "run" ]; then
