@@ -1,0 +1,13 @@
+services:
+  cloudtalk-etl:
+    build: .
+    container_name: cloudtalk-etl
+    restart: unless-stopped
+    environment:
+      - CLOUDTALK_API_KEY_ID=${CLOUDTALK_API_KEY_ID}
+      - CLOUDTALK_API_KEY_SECRET=${CLOUDTALK_API_KEY_SECRET}
+      - DATABASE_URL=${DATABASE_URL}
+      - CRON_SCHEDULE=${CRON_SCHEDULE:-0 2 * * *}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - RATE_LIMIT_RPM=${RATE_LIMIT_RPM:-50}
+      - TZ=Europe/Ljubljana

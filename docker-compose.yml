@@ -1,0 +1,11 @@
+services:
+  cloudtalk-etl:
+    build: .
+    container_name: cloudtalk-etl
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Ljubljana
+    # Override command for development: run once and exit
+    # command: run
