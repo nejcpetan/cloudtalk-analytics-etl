@@ -95,6 +95,87 @@ CREATE TABLE IF NOT EXISTS call_intelligence (
     smart_notes         TEXT,
     synced_at           TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Phase 2: Dimension tables
+
+-- numbers_dim: call center phone numbers with routing info (number → group mapping)
+CREATE TABLE IF NOT EXISTS numbers_dim (
+    id               INTEGER PRIMARY KEY,
+    internal_name    TEXT,
+    caller_id_e164   TEXT,
+    country_code     INTEGER,        -- 386=SLO, 385=HR
+    connected_to     INTEGER,        -- 0=group, 1=agent, 2=conference, 3=fax
+    source_id        INTEGER,        -- group_id when connected_to=0
+    synced_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- groups_dim: call center queue groups (IVR destination groups / "ponorna številke")
+CREATE TABLE IF NOT EXISTS groups_dim (
+    id            INTEGER PRIMARY KEY,
+    internal_name TEXT NOT NULL,
+    synced_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- tags_dim: call reason tags applied by agents post-call
+CREATE TABLE IF NOT EXISTS tags_dim (
+    id        INTEGER PRIMARY KEY,
+    name      TEXT NOT NULL,
+    synced_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- call_tags: which tags were applied to each call (many-to-many bridge)
+CREATE TABLE IF NOT EXISTS call_tags (
+    call_id  BIGINT  NOT NULL,
+    tag_id   INTEGER NOT NULL,
+    tag_name TEXT,
+    PRIMARY KEY (call_id, tag_id)
+);
+
+-- call_center_daily_stats: aggregated call stats per group per day (Block A reporting)
+CREATE TABLE IF NOT EXISTS call_center_daily_stats (
+    sync_date       DATE    NOT NULL,
+    group_id        INTEGER NOT NULL,
+    group_name      TEXT    NOT NULL,
+    country_code    INTEGER,
+    total_calls     INTEGER DEFAULT 0,
+    answered_calls  INTEGER DEFAULT 0,
+    missed_calls    INTEGER DEFAULT 0,
+    callback_calls  INTEGER DEFAULT 0,
+    answer_rate_pct NUMERIC(5,2),
+    synced_at       TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (sync_date, group_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_center_daily_sync_date ON call_center_daily_stats (sync_date);
+CREATE INDEX IF NOT EXISTS idx_call_center_daily_country   ON call_center_daily_stats (country_code);
+
+-- agent_daily_stats: aggregated call stats per agent per day (Block B reporting)
+CREATE TABLE IF NOT EXISTS agent_daily_stats (
+    sync_date          DATE    NOT NULL,
+    agent_id           INTEGER NOT NULL,
+    agent_name         TEXT,
+    presented_calls    INTEGER DEFAULT 0,
+    answered_calls     INTEGER DEFAULT 0,
+    total_talk_seconds INTEGER DEFAULT 0,
+    synced_at          TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (sync_date, agent_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_daily_stats_sync_date ON agent_daily_stats (sync_date);
+
+-- call_reasons_daily: tag usage counts per group per day (Block C reporting)
+CREATE TABLE IF NOT EXISTS call_reasons_daily (
+    sync_date   DATE    NOT NULL,
+    group_id    INTEGER NOT NULL,
+    group_name  TEXT,
+    tag_id      INTEGER NOT NULL,
+    tag_name    TEXT,
+    call_count  INTEGER DEFAULT 0,
+    synced_at   TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (sync_date, group_id, tag_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_call_reasons_daily_sync_date ON call_reasons_daily (sync_date);
 """
 
 

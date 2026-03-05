@@ -144,3 +144,209 @@ def upsert_group_stats(conn: psycopg.Connection, stats: list[dict],
     count = len(stats)
     logger.info("group_stats_upserted", count=count, sync_date=str(sync_date))
     return count
+
+
+# ===========================================================================
+# Phase 2: Dimension table upserts
+# ===========================================================================
+
+def upsert_numbers_dim(conn: psycopg.Connection, numbers: list[dict]) -> int:
+    """Upsert phone number dimension records."""
+    if not numbers:
+        return 0
+
+    query = """
+        INSERT INTO numbers_dim (
+            id, internal_name, caller_id_e164, country_code,
+            connected_to, source_id, synced_at
+        ) VALUES (
+            %(id)s, %(internal_name)s, %(caller_id_e164)s, %(country_code)s,
+            %(connected_to)s, %(source_id)s, NOW()
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            internal_name  = EXCLUDED.internal_name,
+            caller_id_e164 = EXCLUDED.caller_id_e164,
+            country_code   = EXCLUDED.country_code,
+            connected_to   = EXCLUDED.connected_to,
+            source_id      = EXCLUDED.source_id,
+            synced_at      = NOW()
+    """
+
+    with conn.cursor() as cur:
+        cur.executemany(query, numbers)
+
+    conn.commit()
+    count = len(numbers)
+    logger.info("numbers_dim_upserted", count=count)
+    return count
+
+
+def upsert_groups_dim(conn: psycopg.Connection, groups: list[dict]) -> int:
+    """Upsert group dimension records."""
+    if not groups:
+        return 0
+
+    query = """
+        INSERT INTO groups_dim (id, internal_name, synced_at)
+        VALUES (%(id)s, %(internal_name)s, NOW())
+        ON CONFLICT (id) DO UPDATE SET
+            internal_name = EXCLUDED.internal_name,
+            synced_at     = NOW()
+    """
+
+    with conn.cursor() as cur:
+        cur.executemany(query, groups)
+
+    conn.commit()
+    count = len(groups)
+    logger.info("groups_dim_upserted", count=count)
+    return count
+
+
+def upsert_tags_dim(conn: psycopg.Connection, tags: list[dict]) -> int:
+    """Upsert tag dimension records."""
+    if not tags:
+        return 0
+
+    query = """
+        INSERT INTO tags_dim (id, name, synced_at)
+        VALUES (%(id)s, %(name)s, NOW())
+        ON CONFLICT (id) DO UPDATE SET
+            name      = EXCLUDED.name,
+            synced_at = NOW()
+    """
+
+    with conn.cursor() as cur:
+        cur.executemany(query, tags)
+
+    conn.commit()
+    count = len(tags)
+    logger.info("tags_dim_upserted", count=count)
+    return count
+
+
+# ===========================================================================
+# Phase 2: Fact / bridge table upserts
+# ===========================================================================
+
+def upsert_call_tags(conn: psycopg.Connection, call_tags: list[dict]) -> int:
+    """
+    Batch upsert call-tag bridge records.
+
+    Uses DO NOTHING on conflict — the bridge row has no updateable fields.
+    """
+    if not call_tags:
+        return 0
+
+    query = """
+        INSERT INTO call_tags (call_id, tag_id, tag_name)
+        VALUES (%(call_id)s, %(tag_id)s, %(tag_name)s)
+        ON CONFLICT (call_id, tag_id) DO NOTHING
+    """
+
+    with conn.cursor() as cur:
+        cur.executemany(query, call_tags)
+
+    conn.commit()
+    count = len(call_tags)
+    logger.info("call_tags_upserted", count=count)
+    return count
+
+
+def upsert_call_center_daily_stats(
+    conn: psycopg.Connection, stats: list[dict], sync_date: date
+) -> int:
+    """Batch upsert call center daily aggregated statistics."""
+    if not stats:
+        return 0
+
+    query = """
+        INSERT INTO call_center_daily_stats (
+            sync_date, group_id, group_name, country_code,
+            total_calls, answered_calls, missed_calls,
+            callback_calls, answer_rate_pct, synced_at
+        ) VALUES (
+            %(sync_date)s, %(group_id)s, %(group_name)s, %(country_code)s,
+            %(total_calls)s, %(answered_calls)s, %(missed_calls)s,
+            %(callback_calls)s, %(answer_rate_pct)s, NOW()
+        )
+        ON CONFLICT (sync_date, group_id) DO UPDATE SET
+            group_name     = EXCLUDED.group_name,
+            country_code   = EXCLUDED.country_code,
+            total_calls    = EXCLUDED.total_calls,
+            answered_calls = EXCLUDED.answered_calls,
+            missed_calls   = EXCLUDED.missed_calls,
+            callback_calls = EXCLUDED.callback_calls,
+            answer_rate_pct = EXCLUDED.answer_rate_pct,
+            synced_at      = NOW()
+    """
+
+    with conn.cursor() as cur:
+        cur.executemany(query, stats)
+
+    conn.commit()
+    count = len(stats)
+    logger.info("call_center_daily_stats_upserted", count=count, sync_date=str(sync_date))
+    return count
+
+
+def upsert_agent_daily_stats(
+    conn: psycopg.Connection, stats: list[dict], sync_date: date
+) -> int:
+    """Batch upsert agent daily aggregated statistics."""
+    if not stats:
+        return 0
+
+    query = """
+        INSERT INTO agent_daily_stats (
+            sync_date, agent_id, agent_name,
+            presented_calls, answered_calls, total_talk_seconds, synced_at
+        ) VALUES (
+            %(sync_date)s, %(agent_id)s, %(agent_name)s,
+            %(presented_calls)s, %(answered_calls)s, %(total_talk_seconds)s, NOW()
+        )
+        ON CONFLICT (sync_date, agent_id) DO UPDATE SET
+            agent_name         = EXCLUDED.agent_name,
+            presented_calls    = EXCLUDED.presented_calls,
+            answered_calls     = EXCLUDED.answered_calls,
+            total_talk_seconds = EXCLUDED.total_talk_seconds,
+            synced_at          = NOW()
+    """
+
+    with conn.cursor() as cur:
+        cur.executemany(query, stats)
+
+    conn.commit()
+    count = len(stats)
+    logger.info("agent_daily_stats_upserted", count=count, sync_date=str(sync_date))
+    return count
+
+
+def upsert_call_reasons_daily(
+    conn: psycopg.Connection, reasons: list[dict], sync_date: date
+) -> int:
+    """Batch upsert call reason tag counts per group per day."""
+    if not reasons:
+        return 0
+
+    query = """
+        INSERT INTO call_reasons_daily (
+            sync_date, group_id, group_name, tag_id, tag_name, call_count, synced_at
+        ) VALUES (
+            %(sync_date)s, %(group_id)s, %(group_name)s,
+            %(tag_id)s, %(tag_name)s, %(call_count)s, NOW()
+        )
+        ON CONFLICT (sync_date, group_id, tag_id) DO UPDATE SET
+            group_name = EXCLUDED.group_name,
+            tag_name   = EXCLUDED.tag_name,
+            call_count = EXCLUDED.call_count,
+            synced_at  = NOW()
+    """
+
+    with conn.cursor() as cur:
+        cur.executemany(query, reasons)
+
+    conn.commit()
+    count = len(reasons)
+    logger.info("call_reasons_daily_upserted", count=count, sync_date=str(sync_date))
+    return count

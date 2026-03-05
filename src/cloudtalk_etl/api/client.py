@@ -243,6 +243,45 @@ class CloudTalkClient:
         """
         return self._request("GET", "/statistics/realtime/groups.json")
 
+    def get_groups(self, page: int = 1, limit: int = 1000) -> dict:
+        """
+        Fetch all call center groups (queue groups / "ponorna številke").
+
+        Returns:
+            Raw API response dict containing responseData envelope.
+        """
+        return self._request(
+            "GET",
+            "/groups/index.json",
+            params={"page": page, "limit": limit},
+        )
+
+    def get_numbers(self, page: int = 1, limit: int = 1000) -> dict:
+        """
+        Fetch all registered phone numbers with their routing configuration.
+
+        Returns:
+            Raw API response dict containing responseData envelope.
+        """
+        return self._request(
+            "GET",
+            "/numbers/index.json",
+            params={"page": page, "limit": limit},
+        )
+
+    def get_tags(self, page: int = 1, limit: int = 1000) -> dict:
+        """
+        Fetch all call reason tags.
+
+        Returns:
+            Raw API response dict containing responseData envelope.
+        """
+        return self._request(
+            "GET",
+            "/tags/index.json",
+            params={"page": page, "limit": limit},
+        )
+
     # ------------------------------------------------------------------
     # Generic paginator
     # ------------------------------------------------------------------

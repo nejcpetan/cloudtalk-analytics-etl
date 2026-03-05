@@ -56,3 +56,33 @@ def extract_group_stats(client: CloudTalkClient) -> list[dict]:
 
     logger.info("group_stats_extracted", count=len(groups))
     return groups
+
+
+def extract_groups_dim(client: CloudTalkClient) -> list[dict]:
+    """Extract all groups for the groups dimension table."""
+    logger.info("extracting_groups_dim")
+
+    groups = client.get_all_pages(client.get_groups, limit=1000)
+
+    logger.info("groups_dim_extracted", count=len(groups))
+    return groups
+
+
+def extract_numbers(client: CloudTalkClient) -> list[dict]:
+    """Extract all phone numbers with their routing configuration."""
+    logger.info("extracting_numbers")
+
+    numbers = client.get_all_pages(client.get_numbers, limit=1000)
+
+    logger.info("numbers_extracted", count=len(numbers))
+    return numbers
+
+
+def extract_tags(client: CloudTalkClient) -> list[dict]:
+    """Extract all call reason tags."""
+    logger.info("extracting_tags")
+
+    tags = client.get_all_pages(client.get_tags, limit=1000)
+
+    logger.info("tags_extracted", count=len(tags))
+    return tags
