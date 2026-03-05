@@ -154,20 +154,21 @@ def transform_numbers(raw_numbers: list[dict]) -> list[dict]:
     """
     Transform raw /numbers/index.json records into flat dicts for numbers_dim.
 
-    connected_to values: 0=group, 1=agent, 2=conference, 3=fax.
-    source_id is the group_id when connected_to == 0.
+    Each API record is wrapped in a "CallNumber" key.
+    source_id is not provided by the API and will be None.
     """
     transformed = []
 
     for item in raw_numbers:
-        connected_to_val = item.get("connected_to")
+        cn = item.get("CallNumber", {})
+        connected_to_val = cn.get("connected_to")
         transformed.append({
-            "id": safe_int(item.get("id")),
-            "internal_name": item.get("internal_name") or None,
-            "caller_id_e164": item.get("caller_id_e164") or None,
-            "country_code": safe_int(item.get("country_code")) or None,
+            "id": safe_int(cn.get("id")),
+            "internal_name": cn.get("internal_name") or None,
+            "caller_id_e164": cn.get("caller_id_e164") or None,
+            "country_code": safe_int(cn.get("country_code")) or None,
             "connected_to": int(connected_to_val) if connected_to_val is not None else None,
-            "source_id": safe_int(item.get("source_id")) or None,
+            "source_id": safe_int(cn.get("source_id")) or None,
         })
 
     logger.info("numbers_transformed", count=len(transformed))
@@ -175,28 +176,42 @@ def transform_numbers(raw_numbers: list[dict]) -> list[dict]:
 
 
 def transform_groups_dim(raw_groups: list[dict]) -> list[dict]:
-    """Transform raw /groups/index.json records into flat dicts for groups_dim."""
+    """
+    Transform raw /groups/index.json records into flat dicts for groups_dim.
+
+    Each API record is wrapped in a "Group" key.
+    Skips placeholder rows (id=0 or null internal_name) that the API may return.
+    """
     transformed = []
 
     for item in raw_groups:
-        transformed.append({
-            "id": safe_int(item.get("id")),
-            "internal_name": item.get("internal_name") or None,
-        })
+        group = item.get("Group", {})
+        group_id = safe_int(group.get("id"))
+        internal_name = group.get("internal_name") or None
+        if not group_id or not internal_name:
+            continue  # skip id=0 / unnamed placeholder groups
+        transformed.append({"id": group_id, "internal_name": internal_name})
 
     logger.info("groups_dim_transformed", count=len(transformed))
     return transformed
 
 
 def transform_tags(raw_tags: list[dict]) -> list[dict]:
-    """Transform raw /tags/index.json records into flat dicts for tags_dim."""
+    """
+    Transform raw /tags/index.json records into flat dicts for tags_dim.
+
+    Each API record is wrapped in a "Tag" key.
+    Skips placeholder rows (id=0 or null name) that the API may return.
+    """
     transformed = []
 
     for item in raw_tags:
-        transformed.append({
-            "id": safe_int(item.get("id")),
-            "name": item.get("name") or None,
-        })
+        tag = item.get("Tag", {})
+        tag_id = safe_int(tag.get("id"))
+        name = tag.get("name") or None
+        if not tag_id or not name:
+            continue  # skip unnamed / zero-id placeholders
+        transformed.append({"id": tag_id, "name": name})
 
     logger.info("tags_transformed", count=len(transformed))
     return transformed
@@ -266,24 +281,22 @@ def transform_call_tags(raw_calls: list[dict]) -> list[dict]:
 
 def transform_call_center_daily_stats(
     raw_calls: list[dict],
-    number_lookup: dict,
     sync_date: date,
 ) -> list[dict]:
     """
-    Aggregate raw call records into per-group per-day statistics.
+    Aggregate raw call records into per-number (call center line) per-day statistics.
 
-    Uses CallNumber.id from each call to map to a group via number_lookup.
-    Calls not mapped to a known group are silently skipped (e.g. direct-to-agent calls).
+    Uses CallNumber embedded in each call directly — no external lookup needed.
+    Calls without a valid CallNumber.id are silently skipped.
 
     Args:
-        raw_calls:     Raw call records from /calls/index.json.
-        number_lookup: Built by build_number_lookup(). Keyed by number_id (int).
-        sync_date:     The date being synced.
+        raw_calls:  Raw call records from /calls/index.json.
+        sync_date:  The date being synced.
 
     Returns:
         List of aggregated stat dicts ready for call_center_daily_stats upsert.
     """
-    # {group_id: {group_name, country_code, total, answered, missed}}
+    # {number_id: {group_name, country_code, total, answered, missed}}
     buckets: dict[int, dict] = {}
 
     for record in raw_calls:
@@ -291,36 +304,35 @@ def transform_call_center_daily_stats(
         call_number = record.get("CallNumber", {})
 
         number_id = safe_int(call_number.get("id")) or None
-        info = number_lookup.get(number_id) if number_id else None
+        if not number_id:
+            continue  # skip calls without a routable number
 
-        if not info or not info.get("group_id"):
-            continue  # not routed to a known group
+        group_name = call_number.get("internal_name") or "Unknown"
+        country_code = safe_int(call_number.get("country_code")) or None
 
-        group_id = info["group_id"]
-
-        if group_id not in buckets:
-            buckets[group_id] = {
-                "group_name": info.get("group_name", "Unknown"),
-                "country_code": info.get("country_code"),
+        if number_id not in buckets:
+            buckets[number_id] = {
+                "group_name": group_name,
+                "country_code": country_code,
                 "total": 0,
                 "answered": 0,
                 "missed": 0,
             }
 
-        buckets[group_id]["total"] += 1
+        buckets[number_id]["total"] += 1
         if cdr.get("answered_at"):
-            buckets[group_id]["answered"] += 1
+            buckets[number_id]["answered"] += 1
         else:
-            buckets[group_id]["missed"] += 1
+            buckets[number_id]["missed"] += 1
 
     result = []
-    for group_id, data in buckets.items():
+    for number_id, data in buckets.items():
         total = data["total"]
         answered = data["answered"]
         answer_rate = round(answered / total * 100, 2) if total > 0 else 0.0
         result.append({
             "sync_date": sync_date,
-            "group_id": group_id,
+            "group_id": number_id,  # number_id used as group surrogate key
             "group_name": data["group_name"],
             "country_code": data["country_code"],
             "total_calls": total,
@@ -397,37 +409,32 @@ def transform_agent_daily_stats(
 
 def transform_call_reasons_daily(
     raw_calls: list[dict],
-    number_lookup: dict,
     sync_date: date,
 ) -> list[dict]:
     """
-    Aggregate tag usage counts per group per day.
+    Aggregate tag usage counts per call center number per day.
 
-    Crosses call tags with the group each call was routed to, producing a
-    count of how many times each tag was used in each group on the given day.
+    Crosses call tags with the CallNumber each call came through, producing a
+    count of how many times each tag was used per number on the given day.
 
     Args:
-        raw_calls:     Raw call records from /calls/index.json.
-        number_lookup: Built by build_number_lookup(). Keyed by number_id (int).
-        sync_date:     The date being synced.
+        raw_calls:  Raw call records from /calls/index.json.
+        sync_date:  The date being synced.
 
     Returns:
         List of aggregated reason dicts ready for call_reasons_daily upsert.
     """
-    # {(group_id, tag_id): {group_name, tag_name, count}}
+    # {(number_id, tag_id): {group_name, tag_name, count}}
     buckets: dict[tuple, dict] = {}
 
     for record in raw_calls:
         call_number = record.get("CallNumber", {})
 
         number_id = safe_int(call_number.get("id")) or None
-        info = number_lookup.get(number_id) if number_id else None
-
-        if not info or not info.get("group_id"):
+        if not number_id:
             continue
 
-        group_id = info["group_id"]
-        group_name = info.get("group_name", "Unknown")
+        group_name = call_number.get("internal_name") or "Unknown"
 
         tags = record.get("Tags", []) or []
         for tag in tags:
@@ -435,7 +442,7 @@ def transform_call_reasons_daily(
             if not tag_id:
                 continue
 
-            key = (group_id, tag_id)
+            key = (number_id, tag_id)
             if key not in buckets:
                 buckets[key] = {
                     "group_name": group_name,
@@ -445,10 +452,10 @@ def transform_call_reasons_daily(
             buckets[key]["count"] += 1
 
     result = []
-    for (group_id, tag_id), data in buckets.items():
+    for (number_id, tag_id), data in buckets.items():
         result.append({
             "sync_date": sync_date,
-            "group_id": group_id,
+            "group_id": number_id,  # number_id used as group surrogate key
             "group_name": data["group_name"],
             "tag_id": tag_id,
             "tag_name": data["tag_name"],

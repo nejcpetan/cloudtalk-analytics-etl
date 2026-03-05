@@ -56,7 +56,12 @@ def sample_raw_call_with_tags() -> dict:
         },
         "Agent": {"id": "42", "fullname": "Jane Doe"},
         "Contact": {"id": "999", "name": "Test Customer"},
-        "CallNumber": {"id": "7", "caller_id_e164": "+38612345678"},
+        "CallNumber": {
+            "id": "7",
+            "caller_id_e164": "+38612345678",
+            "internal_name": "Reklamacije SLO",
+            "country_code": "386",
+        },
         "Tags": [
             {"id": "5", "name": "REKLAMACIJE"},
             {"id": "13", "name": "SVETOVANJE PRI PRODAJI"},
@@ -77,7 +82,12 @@ def sample_raw_call_missed() -> dict:
         },
         "Agent": {},
         "Contact": {},
-        "CallNumber": {"id": "7", "caller_id_e164": "+38612345678"},
+        "CallNumber": {
+            "id": "7",
+            "caller_id_e164": "+38612345678",
+            "internal_name": "Reklamacije SLO",
+            "country_code": "386",
+        },
         "Tags": [],
     }
 

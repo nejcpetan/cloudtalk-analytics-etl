@@ -23,7 +23,6 @@ from cloudtalk_etl.etl.transform import (
     transform_numbers,
     transform_groups_dim,
     transform_tags,
-    build_number_lookup,
     transform_call_tags,
     transform_call_center_daily_stats,
     transform_agent_daily_stats,
@@ -85,10 +84,8 @@ def run_etl() -> None:
 
     failed_stages: list[str] = []
 
-    # These are shared across stages — initialise before any try block
+    # Shared across stages — initialise before any try block
     raw_calls: list[dict] = []
-    numbers: list[dict] = []
-    groups_dim_list: list[dict] = []
 
     try:
         ensure_schema(conn)
@@ -103,6 +100,7 @@ def run_etl() -> None:
             calls = transform_calls(raw_calls, sync_date)
             calls_count = load_calls(conn, calls)
         except Exception:
+            conn.rollback()
             logger.exception("stage_failed", stage="calls", sync_date=str(sync_date))
             failed_stages.append("calls")
 
@@ -112,6 +110,7 @@ def run_etl() -> None:
             agents = transform_agents(raw_agents, sync_date)
             agents_count = load_agents(conn, agents, sync_date)
         except Exception:
+            conn.rollback()
             logger.exception("stage_failed", stage="agents", sync_date=str(sync_date))
             failed_stages.append("agents")
 
@@ -121,6 +120,7 @@ def run_etl() -> None:
             group_stats = transform_group_stats(raw_group_stats, sync_date)
             groups_count = load_group_stats(conn, group_stats, sync_date)
         except Exception:
+            conn.rollback()
             logger.exception("stage_failed", stage="group_stats", sync_date=str(sync_date))
             failed_stages.append("group_stats")
 
@@ -134,6 +134,7 @@ def run_etl() -> None:
             numbers = transform_numbers(raw_numbers)
             numbers_dim_count = load_numbers_dim(conn, numbers)
         except Exception:
+            conn.rollback()
             logger.exception("stage_failed", stage="numbers_dim", sync_date=str(sync_date))
             failed_stages.append("numbers_dim")
 
@@ -143,6 +144,7 @@ def run_etl() -> None:
             groups_dim_list = transform_groups_dim(raw_groups_dim)
             groups_dim_count = load_groups_dim(conn, groups_dim_list)
         except Exception:
+            conn.rollback()
             logger.exception("stage_failed", stage="groups_dim", sync_date=str(sync_date))
             failed_stages.append("groups_dim")
 
@@ -152,6 +154,7 @@ def run_etl() -> None:
             tags = transform_tags(raw_tags)
             tags_dim_count = load_tags_dim(conn, tags)
         except Exception:
+            conn.rollback()
             logger.exception("stage_failed", stage="tags_dim", sync_date=str(sync_date))
             failed_stages.append("tags_dim")
 
@@ -160,23 +163,22 @@ def run_etl() -> None:
         # =====================================================================
 
         if "calls" not in failed_stages:
-            number_lookup = build_number_lookup(numbers, groups_dim_list)
 
             # === CALL TAGS ===
             try:
                 call_tag_pairs = transform_call_tags(raw_calls)
                 call_tags_count = load_call_tags(conn, call_tag_pairs)
             except Exception:
+                conn.rollback()
                 logger.exception("stage_failed", stage="call_tags", sync_date=str(sync_date))
                 failed_stages.append("call_tags")
 
             # === CALL CENTER DAILY STATS ===
             try:
-                cc_stats = transform_call_center_daily_stats(
-                    raw_calls, number_lookup, sync_date
-                )
+                cc_stats = transform_call_center_daily_stats(raw_calls, sync_date)
                 cc_stats_count = load_call_center_daily_stats(conn, cc_stats, sync_date)
             except Exception:
+                conn.rollback()
                 logger.exception("stage_failed", stage="call_center_daily_stats",
                                  sync_date=str(sync_date))
                 failed_stages.append("call_center_daily_stats")
@@ -186,15 +188,17 @@ def run_etl() -> None:
                 agent_stats = transform_agent_daily_stats(raw_calls, sync_date)
                 agent_stats_count = load_agent_daily_stats(conn, agent_stats, sync_date)
             except Exception:
+                conn.rollback()
                 logger.exception("stage_failed", stage="agent_daily_stats",
                                  sync_date=str(sync_date))
                 failed_stages.append("agent_daily_stats")
 
             # === CALL REASONS DAILY ===
             try:
-                reasons = transform_call_reasons_daily(raw_calls, number_lookup, sync_date)
+                reasons = transform_call_reasons_daily(raw_calls, sync_date)
                 reasons_count = load_call_reasons_daily(conn, reasons, sync_date)
             except Exception:
+                conn.rollback()
                 logger.exception("stage_failed", stage="call_reasons_daily",
                                  sync_date=str(sync_date))
                 failed_stages.append("call_reasons_daily")

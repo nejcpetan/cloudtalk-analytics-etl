@@ -272,9 +272,10 @@ def test_transform_group_stats_empty_list():
 # --- transform_numbers ---
 
 def test_transform_numbers_basic():
-    raw = [{"id": 7, "internal_name": "Reklamacije SLO",
-            "caller_id_e164": "+38612345678", "country_code": 386,
-            "connected_to": 0, "source_id": 10}]
+    # API wraps each record in a "CallNumber" key
+    raw = [{"CallNumber": {"id": "7", "internal_name": "Reklamacije SLO",
+                           "caller_id_e164": "+38612345678", "country_code": "386",
+                           "connected_to": "4"}}]
     result = transform_numbers(raw)
     assert len(result) == 1
     row = result[0]
@@ -282,19 +283,20 @@ def test_transform_numbers_basic():
     assert row["internal_name"] == "Reklamacije SLO"
     assert row["caller_id_e164"] == "+38612345678"
     assert row["country_code"] == 386
-    assert row["connected_to"] == 0
-    assert row["source_id"] == 10
+    assert row["connected_to"] == 4
+    assert row["source_id"] is None  # not provided by API
 
 
-def test_transform_numbers_agent_connected_to_is_preserved():
-    raw = [{"id": 9, "internal_name": "Direct", "caller_id_e164": "+38641000001",
-            "country_code": 386, "connected_to": 1, "source_id": 42}]
+def test_transform_numbers_connected_to_is_preserved():
+    raw = [{"CallNumber": {"id": "9", "internal_name": "Direct",
+                           "caller_id_e164": "+38641000001",
+                           "country_code": "386", "connected_to": "1"}}]
     result = transform_numbers(raw)
     assert result[0]["connected_to"] == 1
 
 
 def test_transform_numbers_missing_connected_to_becomes_none():
-    raw = [{"id": 5, "internal_name": "X"}]
+    raw = [{"CallNumber": {"id": "5", "internal_name": "X"}}]
     result = transform_numbers(raw)
     assert result[0]["connected_to"] is None
     assert result[0]["source_id"] is None
@@ -308,12 +310,21 @@ def test_transform_numbers_empty_list():
 # --- transform_groups_dim ---
 
 def test_transform_groups_dim_basic():
-    raw = [{"id": "10", "internal_name": "Reklamacije SLO"},
-           {"id": "11", "internal_name": "Svetovanje HR"}]
+    # API wraps each record in a "Group" key
+    raw = [{"Group": {"id": "10", "internal_name": "Reklamacije SLO"}},
+           {"Group": {"id": "11", "internal_name": "Svetovanje HR"}}]
     result = transform_groups_dim(raw)
     assert len(result) == 2
     assert result[0] == {"id": 10, "internal_name": "Reklamacije SLO"}
     assert result[1] == {"id": 11, "internal_name": "Svetovanje HR"}
+
+
+def test_transform_groups_dim_skips_placeholder():
+    raw = [{"Group": {"id": "0", "internal_name": None}},
+           {"Group": {"id": "10", "internal_name": "Support"}}]
+    result = transform_groups_dim(raw)
+    assert len(result) == 1
+    assert result[0]["id"] == 10
 
 
 def test_transform_groups_dim_empty_list():
@@ -323,11 +334,21 @@ def test_transform_groups_dim_empty_list():
 # --- transform_tags ---
 
 def test_transform_tags_basic():
-    raw = [{"id": "5", "name": "REKLAMACIJE"}, {"id": "13", "name": "SVETOVANJE PRI PRODAJI"}]
+    # API wraps each record in a "Tag" key
+    raw = [{"Tag": {"id": "5", "name": "REKLAMACIJE"}},
+           {"Tag": {"id": "13", "name": "SVETOVANJE PRI PRODAJI"}}]
     result = transform_tags(raw)
     assert len(result) == 2
     assert result[0] == {"id": 5, "name": "REKLAMACIJE"}
     assert result[1] == {"id": 13, "name": "SVETOVANJE PRI PRODAJI"}
+
+
+def test_transform_tags_skips_placeholder():
+    raw = [{"Tag": {"id": "0", "name": None}},
+           {"Tag": {"id": "5", "name": "REKLAMACIJE"}}]
+    result = transform_tags(raw)
+    assert len(result) == 1
+    assert result[0]["id"] == 5
 
 
 def test_transform_tags_empty_list():
@@ -398,16 +419,14 @@ def test_transform_call_tags_empty_list():
 
 # --- transform_call_center_daily_stats ---
 
-def test_transform_call_center_daily_stats_answered(
-        sample_raw_call_with_tags, sample_number_lookup):
-    result = transform_call_center_daily_stats(
-        [sample_raw_call_with_tags], sample_number_lookup, SYNC_DATE
-    )
+def test_transform_call_center_daily_stats_answered(sample_raw_call_with_tags):
+    # CallNumber.id=7 used directly as group_id; internal_name and country_code from CallNumber
+    result = transform_call_center_daily_stats([sample_raw_call_with_tags], SYNC_DATE)
     assert len(result) == 1
     row = result[0]
-    assert row["group_id"] == 10
-    assert row["group_name"] == "Reklamacije SLO"
-    assert row["country_code"] == 386
+    assert row["group_id"] == 7  # CallNumber.id
+    assert row["group_name"] == "Reklamacije SLO"  # CallNumber.internal_name
+    assert row["country_code"] == 386  # CallNumber.country_code
     assert row["total_calls"] == 1
     assert row["answered_calls"] == 1
     assert row["missed_calls"] == 0
@@ -416,11 +435,8 @@ def test_transform_call_center_daily_stats_answered(
     assert row["sync_date"] == SYNC_DATE
 
 
-def test_transform_call_center_daily_stats_missed(
-        sample_raw_call_missed, sample_number_lookup):
-    result = transform_call_center_daily_stats(
-        [sample_raw_call_missed], sample_number_lookup, SYNC_DATE
-    )
+def test_transform_call_center_daily_stats_missed(sample_raw_call_missed):
+    result = transform_call_center_daily_stats([sample_raw_call_missed], SYNC_DATE)
     assert len(result) == 1
     row = result[0]
     assert row["answered_calls"] == 0
@@ -429,9 +445,9 @@ def test_transform_call_center_daily_stats_missed(
 
 
 def test_transform_call_center_daily_stats_answer_rate(
-        sample_raw_call_with_tags, sample_raw_call_missed, sample_number_lookup):
+        sample_raw_call_with_tags, sample_raw_call_missed):
     result = transform_call_center_daily_stats(
-        [sample_raw_call_with_tags, sample_raw_call_missed], sample_number_lookup, SYNC_DATE
+        [sample_raw_call_with_tags, sample_raw_call_missed], SYNC_DATE
     )
     row = result[0]
     assert row["total_calls"] == 2
@@ -439,18 +455,17 @@ def test_transform_call_center_daily_stats_answer_rate(
     assert row["answer_rate_pct"] == 50.0
 
 
-def test_transform_call_center_daily_stats_skips_unknown_number(sample_number_lookup):
+def test_transform_call_center_daily_stats_skips_call_without_number():
     call = {
         "Cdr": {"id": "9999", "answered_at": "2026-03-03T09:00:00Z"},
-        "CallNumber": {"id": "999"},   # number not in lookup
         "Tags": [],
     }
-    result = transform_call_center_daily_stats([call], sample_number_lookup, SYNC_DATE)
+    result = transform_call_center_daily_stats([call], SYNC_DATE)
     assert result == []
 
 
-def test_transform_call_center_daily_stats_empty_list(sample_number_lookup):
-    assert transform_call_center_daily_stats([], sample_number_lookup, SYNC_DATE) == []
+def test_transform_call_center_daily_stats_empty_list():
+    assert transform_call_center_daily_stats([], SYNC_DATE) == []
 
 
 # --- transform_agent_daily_stats ---
@@ -508,51 +523,43 @@ def test_transform_agent_daily_stats_empty_list():
 
 # --- transform_call_reasons_daily ---
 
-def test_transform_call_reasons_daily_basic(
-        sample_raw_call_with_tags, sample_number_lookup):
-    result = transform_call_reasons_daily(
-        [sample_raw_call_with_tags], sample_number_lookup, SYNC_DATE
-    )
+def test_transform_call_reasons_daily_basic(sample_raw_call_with_tags):
+    # CallNumber.id=7 used as group_id; group_name from CallNumber.internal_name
+    result = transform_call_reasons_daily([sample_raw_call_with_tags], SYNC_DATE)
     assert len(result) == 2
     tag_ids = {r["tag_id"] for r in result}
     assert tag_ids == {5, 13}
     for row in result:
-        assert row["group_id"] == 10
-        assert row["group_name"] == "Reklamacije SLO"
+        assert row["group_id"] == 7  # CallNumber.id
+        assert row["group_name"] == "Reklamacije SLO"  # CallNumber.internal_name
         assert row["call_count"] == 1
         assert row["sync_date"] == SYNC_DATE
 
 
-def test_transform_call_reasons_daily_accumulates_counts(
-        sample_raw_call_with_tags, sample_number_lookup):
+def test_transform_call_reasons_daily_accumulates_counts(sample_raw_call_with_tags):
     # Two calls both tagged REKLAMACIJE
     call2 = {**sample_raw_call_with_tags,
              "Cdr": {**sample_raw_call_with_tags["Cdr"], "id": "100099"},
              "Tags": [{"id": "5", "name": "REKLAMACIJE"}]}
-    result = transform_call_reasons_daily(
-        [sample_raw_call_with_tags, call2], sample_number_lookup, SYNC_DATE
-    )
+    result = transform_call_reasons_daily([sample_raw_call_with_tags, call2], SYNC_DATE)
     reklamacije = next(r for r in result if r["tag_id"] == 5)
     assert reklamacije["call_count"] == 2
 
 
-def test_transform_call_reasons_daily_skips_calls_without_group(sample_number_lookup):
+def test_transform_call_reasons_daily_skips_calls_without_number():
     call = {
         "Cdr": {"id": "7777"},
-        "CallNumber": {"id": "999"},  # not in lookup
+        # No CallNumber key
         "Tags": [{"id": "5", "name": "REKLAMACIJE"}],
     }
-    result = transform_call_reasons_daily([call], sample_number_lookup, SYNC_DATE)
+    result = transform_call_reasons_daily([call], SYNC_DATE)
     assert result == []
 
 
-def test_transform_call_reasons_daily_no_tags(
-        sample_raw_call_missed, sample_number_lookup):
-    result = transform_call_reasons_daily(
-        [sample_raw_call_missed], sample_number_lookup, SYNC_DATE
-    )
+def test_transform_call_reasons_daily_no_tags(sample_raw_call_missed):
+    result = transform_call_reasons_daily([sample_raw_call_missed], SYNC_DATE)
     assert result == []
 
 
-def test_transform_call_reasons_daily_empty_list(sample_number_lookup):
-    assert transform_call_reasons_daily([], sample_number_lookup, SYNC_DATE) == []
+def test_transform_call_reasons_daily_empty_list():
+    assert transform_call_reasons_daily([], SYNC_DATE) == []
