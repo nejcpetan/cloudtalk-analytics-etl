@@ -38,20 +38,15 @@ from cloudtalk_etl.api.rate_limiter import TokenBucketRateLimiter
 # ======================================================================
 
 BASE_URL = "https://my.cloudtalk.io/api"
+ANALYTICS_BASE_URL = "https://analytics-api.cloudtalk.io/api"
 
 
 def _make_client(httpx_mock, max_retries: int = 1) -> CloudTalkClient:
     """
     Build a CloudTalkClient whose transport is intercepted by pytest-httpx.
 
-    # With pytest-httpx, the default httpx.Client() transport gets automatically patched
-    # for the duration of the test.
-    real_http_client = httpx.Client()
-    # via httpx.MockTransport.  But the simplest tested approach is to just
-    # instantiate a fresh httpx.Client and let pytest-httpx patch it via the
-    # fixture magic on the *default* transports.  Because pytest-httpx patches
-    # at the TRANSPORT level globally for the test, any httpx.Client created
-    # during the test will use the mock transport automatically.
+    Because pytest-httpx patches at the TRANSPORT level globally for the test,
+    any httpx.Client created during the test will use the mock transport automatically.
     """
     real_http_client = httpx.Client()
     rate_limiter = TokenBucketRateLimiter(rate_per_minute=600)  # fast -- no throttle in tests
@@ -60,6 +55,7 @@ def _make_client(httpx_mock, max_retries: int = 1) -> CloudTalkClient:
         api_key_id="test_id",
         api_key_secret="test_secret",
         base_url=BASE_URL,
+        analytics_base_url=ANALYTICS_BASE_URL,
         rate_limiter=rate_limiter,
         max_retries=max_retries,
         http_client=real_http_client,
@@ -144,11 +140,33 @@ def test_get_agents_hits_correct_endpoint(httpx_mock, client):
     assert "/agents/index.json" in str(req.url)
 
 
-def test_get_group_stats_hits_correct_endpoint(httpx_mock, client):
-    httpx_mock.add_response(json={"responseData": {"data": {"groups": []}}})
-    client.get_group_stats()
+def test_get_call_detail_hits_analytics_endpoint(httpx_mock, client):
+    """get_call_detail() must call the analytics API base URL with the call ID."""
+    detail_payload = {"cdr_id": 100001, "status": "answered", "call_steps": []}
+    httpx_mock.add_response(json=detail_payload)
+
+    result = client.get_call_detail(100001)
+
     req = httpx_mock.get_requests()[0]
-    assert "/statistics/realtime/groups.json" in str(req.url)
+    assert "analytics-api.cloudtalk.io" in str(req.url)
+    assert "/calls/100001" in str(req.url)
+    assert result["cdr_id"] == 100001
+
+
+def test_get_call_detail_returns_parsed_json(httpx_mock, client):
+    """get_call_detail() should return the parsed response dict."""
+    payload = {
+        "cdr_id": 99999,
+        "status": "missed",
+        "call_steps": [],
+        "call_tags": [],
+    }
+    httpx_mock.add_response(json=payload)
+
+    result = client.get_call_detail(99999)
+
+    assert result["cdr_id"] == 99999
+    assert result["status"] == "missed"
 
 
 # ======================================================================

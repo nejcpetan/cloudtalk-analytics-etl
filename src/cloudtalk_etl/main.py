@@ -10,35 +10,19 @@ from cloudtalk_etl.db.connection import get_connection
 from cloudtalk_etl.db.schema import ensure_schema
 from cloudtalk_etl.etl.extract import (
     extract_calls,
-    extract_agents,
-    extract_group_stats,
-    extract_groups_dim,
-    extract_numbers,
+    extract_call_details,
+    extract_groups,
     extract_tags,
 )
 from cloudtalk_etl.etl.transform import (
-    transform_calls,
-    transform_agents,
-    transform_group_stats,
-    transform_numbers,
-    transform_groups_dim,
-    transform_tags,
-    transform_call_tags,
-    transform_call_center_daily_stats,
-    transform_agent_daily_stats,
-    transform_call_reasons_daily,
+    transform_call_center_groups,
+    transform_agent_stats,
+    transform_call_reasons,
 )
 from cloudtalk_etl.etl.load import (
-    load_calls,
-    load_agents,
-    load_group_stats,
-    load_numbers_dim,
-    load_groups_dim,
-    load_tags_dim,
-    load_call_tags,
-    load_call_center_daily_stats,
-    load_agent_daily_stats,
-    load_call_reasons_daily,
+    load_call_center_groups,
+    load_agent_stats,
+    load_call_reasons,
 )
 
 logger = structlog.get_logger()
@@ -52,7 +36,7 @@ def determine_sync_date(override: str | None) -> date:
 
 
 def run_etl() -> None:
-    """Main ETL entry point with graceful degradation across pipeline stages."""
+    """Main ETL entry point."""
     start_time = time.monotonic()
     settings = Settings()
     sync_date = determine_sync_date(settings.etl_date_override)
@@ -64,149 +48,94 @@ def run_etl() -> None:
         api_key_id=settings.cloudtalk_api_key_id,
         api_key_secret=settings.cloudtalk_api_key_secret,
         base_url=settings.cloudtalk_api_base_url,
+        analytics_base_url=settings.cloudtalk_analytics_api_base_url,
         rate_limiter=rate_limiter,
     )
-    conn = get_connection(settings.database_url)
 
-    # Counters — phase 1
-    calls_count = 0
-    agents_count = 0
-    groups_count = 0
-
-    # Counters — phase 2
-    numbers_dim_count = 0
-    groups_dim_count = 0
-    tags_dim_count = 0
-    call_tags_count = 0
-    cc_stats_count = 0
+    cc_groups_count = 0
     agent_stats_count = 0
-    reasons_count = 0
-
+    call_reasons_count = 0
     failed_stages: list[str] = []
 
-    # Shared across stages — initialise before any try block
-    raw_calls: list[dict] = []
-
     try:
-        ensure_schema(conn)
+        # =====================================================================
+        # Step 0: Ensure schema — short-lived connection, closed immediately.
+        # The API extraction below takes ~20 min, which would exhaust any idle
+        # connection kept open throughout.
+        # =====================================================================
+        conn = get_connection(settings.database_url)
+        try:
+            ensure_schema(conn)
+        finally:
+            conn.close()
 
         # =====================================================================
-        # PHASE 1 — Core data
+        # Step 1: Fetch calls index for target date
         # =====================================================================
-
-        # === CALLS ===
+        raw_calls: list[dict] = []
         try:
             raw_calls = extract_calls(api_client, sync_date, test_mode=settings.test_mode)
-            calls = transform_calls(raw_calls, sync_date)
-            calls_count = load_calls(conn, calls)
         except Exception:
-            conn.rollback()
-            logger.exception("stage_failed", stage="calls", sync_date=str(sync_date))
-            failed_stages.append("calls")
-
-        # === AGENTS ===
-        try:
-            raw_agents = extract_agents(api_client, test_mode=settings.test_mode)
-            agents = transform_agents(raw_agents, sync_date)
-            agents_count = load_agents(conn, agents, sync_date)
-        except Exception:
-            conn.rollback()
-            logger.exception("stage_failed", stage="agents", sync_date=str(sync_date))
-            failed_stages.append("agents")
-
-        # === GROUP STATS (realtime snapshot) ===
-        try:
-            raw_group_stats = extract_group_stats(api_client)
-            group_stats = transform_group_stats(raw_group_stats, sync_date)
-            groups_count = load_group_stats(conn, group_stats, sync_date)
-        except Exception:
-            conn.rollback()
-            logger.exception("stage_failed", stage="group_stats", sync_date=str(sync_date))
-            failed_stages.append("group_stats")
+            logger.exception("stage_failed", stage="calls_index", sync_date=str(sync_date))
+            failed_stages.append("calls_index")
 
         # =====================================================================
-        # PHASE 2 — Dimensions
+        # Step 2: Fetch call details (throttled — 1050ms between requests)
+        # Required for authoritative group assignment and agent step data.
         # =====================================================================
-
-        # === NUMBERS DIM ===
-        try:
-            raw_numbers = extract_numbers(api_client)
-            numbers = transform_numbers(raw_numbers)
-            numbers_dim_count = load_numbers_dim(conn, numbers)
-        except Exception:
-            conn.rollback()
-            logger.exception("stage_failed", stage="numbers_dim", sync_date=str(sync_date))
-            failed_stages.append("numbers_dim")
-
-        # === GROUPS DIM ===
-        try:
-            raw_groups_dim = extract_groups_dim(api_client)
-            groups_dim_list = transform_groups_dim(raw_groups_dim)
-            groups_dim_count = load_groups_dim(conn, groups_dim_list)
-        except Exception:
-            conn.rollback()
-            logger.exception("stage_failed", stage="groups_dim", sync_date=str(sync_date))
-            failed_stages.append("groups_dim")
-
-        # === TAGS DIM ===
-        try:
-            raw_tags = extract_tags(api_client)
-            tags = transform_tags(raw_tags)
-            tags_dim_count = load_tags_dim(conn, tags)
-        except Exception:
-            conn.rollback()
-            logger.exception("stage_failed", stage="tags_dim", sync_date=str(sync_date))
-            failed_stages.append("tags_dim")
+        call_details: dict[int, dict] = {}
+        if "calls_index" not in failed_stages and raw_calls:
+            try:
+                call_details = extract_call_details(
+                    api_client, raw_calls, test_mode=settings.test_mode
+                )
+            except Exception:
+                logger.exception("stage_failed", stage="call_details", sync_date=str(sync_date))
+                failed_stages.append("call_details")
 
         # =====================================================================
-        # PHASE 2 — Analytics (all derived from raw_calls — skip if calls failed)
+        # Step 3: Transform all 3 tables in memory, then open a fresh DB
+        # connection for the load — avoids idle timeout from the long extract.
         # =====================================================================
-
-        if "calls" not in failed_stages:
-
-            # === CALL TAGS ===
+        if "call_details" not in failed_stages and call_details:
+            conn = get_connection(settings.database_url)
             try:
-                call_tag_pairs = transform_call_tags(raw_calls)
-                call_tags_count = load_call_tags(conn, call_tag_pairs)
-            except Exception:
-                conn.rollback()
-                logger.exception("stage_failed", stage="call_tags", sync_date=str(sync_date))
-                failed_stages.append("call_tags")
+                # --- Table 1: call_center_groups ---
+                try:
+                    cc_groups = transform_call_center_groups(call_details, sync_date)
+                    cc_groups_count = load_call_center_groups(conn, cc_groups)
+                except Exception:
+                    conn.rollback()
+                    logger.exception("stage_failed", stage="call_center_groups",
+                                     sync_date=str(sync_date))
+                    failed_stages.append("call_center_groups")
 
-            # === CALL CENTER DAILY STATS ===
-            try:
-                cc_stats = transform_call_center_daily_stats(raw_calls, sync_date)
-                cc_stats_count = load_call_center_daily_stats(conn, cc_stats, sync_date)
-            except Exception:
-                conn.rollback()
-                logger.exception("stage_failed", stage="call_center_daily_stats",
-                                 sync_date=str(sync_date))
-                failed_stages.append("call_center_daily_stats")
+                # --- Table 2: agent_stats ---
+                try:
+                    agent_rows = transform_agent_stats(call_details, sync_date)
+                    agent_stats_count = load_agent_stats(conn, agent_rows)
+                except Exception:
+                    conn.rollback()
+                    logger.exception("stage_failed", stage="agent_stats",
+                                     sync_date=str(sync_date))
+                    failed_stages.append("agent_stats")
 
-            # === AGENT DAILY STATS ===
-            try:
-                agent_stats = transform_agent_daily_stats(raw_calls, sync_date)
-                agent_stats_count = load_agent_daily_stats(conn, agent_stats, sync_date)
-            except Exception:
-                conn.rollback()
-                logger.exception("stage_failed", stage="agent_daily_stats",
-                                 sync_date=str(sync_date))
-                failed_stages.append("agent_daily_stats")
+                # --- Table 3: call_reasons ---
+                try:
+                    reasons = transform_call_reasons(call_details, sync_date)
+                    call_reasons_count = load_call_reasons(conn, reasons)
+                except Exception:
+                    conn.rollback()
+                    logger.exception("stage_failed", stage="call_reasons",
+                                     sync_date=str(sync_date))
+                    failed_stages.append("call_reasons")
+            finally:
+                conn.close()
 
-            # === CALL REASONS DAILY ===
-            try:
-                reasons = transform_call_reasons_daily(raw_calls, sync_date)
-                reasons_count = load_call_reasons_daily(conn, reasons, sync_date)
-            except Exception:
-                conn.rollback()
-                logger.exception("stage_failed", stage="call_reasons_daily",
-                                 sync_date=str(sync_date))
-                failed_stages.append("call_reasons_daily")
-
-        else:
-            logger.warning("analytics_stages_skipped",
-                           reason="calls stage failed",
-                           sync_date=str(sync_date))
+        elif not raw_calls:
+            logger.warning("no_calls_for_date", sync_date=str(sync_date))
+        elif not call_details:
+            logger.warning("all_call_details_skipped", sync_date=str(sync_date))
 
     except Exception:
         elapsed = time.monotonic() - start_time
@@ -215,7 +144,6 @@ def run_etl() -> None:
         sys.exit(1)
     finally:
         api_client.close()
-        conn.close()
 
     elapsed = time.monotonic() - start_time
 
@@ -224,16 +152,9 @@ def run_etl() -> None:
             "etl_completed_with_errors",
             sync_date=str(sync_date),
             failed_stages=failed_stages,
-            calls_synced=calls_count,
-            agents_synced=agents_count,
-            groups_synced=groups_count,
-            numbers_dim_synced=numbers_dim_count,
-            groups_dim_synced=groups_dim_count,
-            tags_dim_synced=tags_dim_count,
-            call_tags_synced=call_tags_count,
-            call_center_stats_synced=cc_stats_count,
+            call_center_groups_synced=cc_groups_count,
             agent_stats_synced=agent_stats_count,
-            call_reasons_synced=reasons_count,
+            call_reasons_synced=call_reasons_count,
             duration_seconds=round(elapsed, 2),
         )
         sys.exit(1)
@@ -241,15 +162,10 @@ def run_etl() -> None:
     logger.info(
         "etl_completed",
         sync_date=str(sync_date),
-        calls_synced=calls_count,
-        agents_synced=agents_count,
-        groups_synced=groups_count,
-        numbers_dim_synced=numbers_dim_count,
-        groups_dim_synced=groups_dim_count,
-        tags_dim_synced=tags_dim_count,
-        call_tags_synced=call_tags_count,
-        call_center_stats_synced=cc_stats_count,
+        calls_in_index=len(raw_calls),
+        call_details_fetched=len(call_details),
+        call_center_groups_synced=cc_groups_count,
         agent_stats_synced=agent_stats_count,
-        call_reasons_synced=reasons_count,
+        call_reasons_synced=call_reasons_count,
         duration_seconds=round(elapsed, 2),
     )

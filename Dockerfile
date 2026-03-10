@@ -14,6 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get purge -y --auto-remove curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Build-time metadata — pass with: --build-arg BUILD_DATE=$(git log -1 --format="%ci")
+ARG BUILD_DATE=unknown
+ARG GIT_COMMIT=unknown
+ENV BUILD_DATE=${BUILD_DATE}
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 WORKDIR /app
 
 # Copy everything needed to build and install the package

@@ -1,6 +1,10 @@
 services:
   cloudtalk-etl:
-    build: .
+    build:
+      context: .
+      args:
+        BUILD_DATE: "${BUILD_DATE:-unknown}"
+        GIT_COMMIT: "${GIT_COMMIT:-unknown}"
     container_name: cloudtalk-etl
     restart: unless-stopped
     init: true
@@ -8,5 +12,4 @@ services:
       - .env
     environment:
       - TZ=Europe/Ljubljana
-    # Override command for development: run once and exit
-    # command: run
+    # Override command for one-off run: docker compose run cloudtalk-etl run

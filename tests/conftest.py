@@ -5,7 +5,7 @@ import pytest
 
 @pytest.fixture
 def sample_raw_call() -> dict:
-    """A minimal raw call record as returned by the CloudTalk API."""
+    """A minimal raw call record as returned by /calls/index.json."""
     return {
         "Cdr": {
             "id": "100001",
@@ -39,101 +39,190 @@ def sample_raw_call() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Phase 2 fixtures
-# ---------------------------------------------------------------------------
-
 @pytest.fixture
-def sample_raw_call_with_tags() -> dict:
-    """Raw call record including Tags and CallNumber, for Phase 2 transforms."""
+def sample_call_detail_answered() -> dict:
+    """
+    A call detail response from GET /calls/{callId} (analytics API).
+
+    Represents an answered call in the 'Reklamacije - SLO' queue,
+    with one agent who was presented and answered.
+    """
     return {
-        "Cdr": {
-            "id": "100001",
-            "type": "incoming",
-            "talking_time": "115",
-            "answered_at": "2026-03-03T09:00:05Z",
-            "user_id": "42",
-        },
-        "Agent": {"id": "42", "fullname": "Jane Doe"},
-        "Contact": {"id": "999", "name": "Test Customer"},
-        "CallNumber": {
-            "id": "7",
-            "caller_id_e164": "+38612345678",
-            "internal_name": "Reklamacije SLO",
-            "country_code": "386",
-        },
-        "Tags": [
-            {"id": "5", "name": "REKLAMACIJE"},
-            {"id": "13", "name": "SVETOVANJE PRI PRODAJI"},
+        "cdr_id": 100001,
+        "uuid": "abc-123",
+        "date": "2026-03-03T09:00:00Z",
+        "status": "answered",
+        "direction": "incoming",
+        "type": "regular",
+        "contact": {"id": 999, "name": "Test Customer", "country": "SI", "number": "+38641000001"},
+        "internal_number": {"id": 7, "name": "Reklamacije - SLO", "number": "+38612345678"},
+        "call_tags": [
+            {"id": 5, "label": "REKLAMACIJE"},
         ],
+        "call_times": {"total_time": 120, "talking_time": 115, "ringing_time": 5},
+        "call_steps": [
+            {
+                "type": "ivr",
+                "name": "Main IVR",
+                "date": "2026-03-03T09:00:00Z",
+            },
+            {
+                "type": "queue",
+                "id": 10,
+                "name": "Reklamacije - SLO",
+                "status": "answered",
+                "strategy": "rrmemory",
+                "date": "2026-03-03T09:00:02Z",
+                "call_times": {"total_time": 118, "talking_time": 115, "ringing_time": 3},
+                "agent_calls": [
+                    {
+                        "type": "agent",
+                        "id": 42,
+                        "name": "Jane Doe",
+                        "status": "answered",
+                        "date": "2026-03-03T09:00:05Z",
+                        "call_times": {
+                            "total_time": 115,
+                            "talking_time": 115,
+                            "ringing_time": 3,
+                            "waiting_time": 2,
+                            "holding_time": 0,
+                            "wrap_up_time": 0,
+                        },
+                        "group_ids": [10],
+                    }
+                ],
+            },
+        ],
+        "notes": [],
+        "recorded": True,
+        "out_of_office": False,
     }
 
 
 @pytest.fixture
-def sample_raw_call_missed() -> dict:
-    """A missed call with no agent and no tags."""
+def sample_call_detail_missed() -> dict:
+    """
+    A call detail response for a missed call (no agent answered).
+    The queue step has status='missed' with an agent who was tried but missed.
+    """
     return {
-        "Cdr": {
-            "id": "100002",
-            "type": "incoming",
-            "talking_time": "0",
-            "answered_at": None,
-            "user_id": None,
-        },
-        "Agent": {},
-        "Contact": {},
-        "CallNumber": {
-            "id": "7",
-            "caller_id_e164": "+38612345678",
-            "internal_name": "Reklamacije SLO",
-            "country_code": "386",
-        },
-        "Tags": [],
+        "cdr_id": 100002,
+        "uuid": "def-456",
+        "date": "2026-03-03T10:00:00Z",
+        "status": "missed",
+        "direction": "incoming",
+        "type": "regular",
+        "contact": {"id": 0, "name": None, "country": "SI", "number": "+38641000002"},
+        "internal_number": {"id": 7, "name": "Reklamacije - SLO", "number": "+38612345678"},
+        "call_tags": [],
+        "call_times": {"total_time": 30, "talking_time": 0, "ringing_time": 30},
+        "call_steps": [
+            {
+                "type": "queue",
+                "id": 10,
+                "name": "Reklamacije - SLO",
+                "status": "missed",
+                "strategy": "rrmemory",
+                "date": "2026-03-03T10:00:00Z",
+                "call_times": {"total_time": 30, "talking_time": 0, "ringing_time": 30},
+                "agent_calls": [
+                    {
+                        "type": "agent",
+                        "id": 42,
+                        "name": "Jane Doe",
+                        "status": "missed",
+                        "date": "2026-03-03T10:00:05Z",
+                        "call_times": {
+                            "total_time": 25,
+                            "talking_time": 0,
+                            "ringing_time": 25,
+                            "waiting_time": 0,
+                            "holding_time": 0,
+                            "wrap_up_time": 0,
+                        },
+                        "group_ids": [10],
+                        "reason": "not_picked_up",
+                    }
+                ],
+            },
+        ],
+        "notes": [],
+        "recorded": False,
+        "out_of_office": False,
     }
 
 
 @pytest.fixture
-def sample_numbers() -> list[dict]:
-    """Transformed number records (post transform_numbers)."""
-    return [
-        {
-            "id": 7,
-            "internal_name": "Reklamacije SLO",
-            "caller_id_e164": "+38612345678",
-            "country_code": 386,
-            "connected_to": 0,
-            "source_id": 10,
-        },
-        {
-            "id": 8,
-            "internal_name": "Svetovanje HR",
-            "caller_id_e164": "+38512345678",
-            "country_code": 385,
-            "connected_to": 0,
-            "source_id": 11,
-        },
-        {
-            "id": 9,
-            "internal_name": "Direct Agent Line",
-            "caller_id_e164": "+38641999999",
-            "country_code": 386,
-            "connected_to": 1,   # agent, not group
-            "source_id": None,
-        },
-    ]
+def sample_call_detail_with_tags() -> dict:
+    """A call detail with multiple tags attached, from a CRO group."""
+    return {
+        "cdr_id": 100003,
+        "uuid": "ghi-789",
+        "date": "2026-03-03T11:00:00Z",
+        "status": "answered",
+        "direction": "incoming",
+        "type": "regular",
+        "contact": {"id": 1001, "name": "Another Customer", "country": "HR", "number": "+38591000001"},
+        "internal_number": {"id": 8, "name": "Reklamacije - CRO", "number": "+38512345678"},
+        "call_tags": [
+            {"id": 5, "label": "REKLAMACIJE"},
+            {"id": 13, "label": "SVETOVANJE PRI PRODAJI"},
+        ],
+        "call_times": {"total_time": 200, "talking_time": 180, "ringing_time": 20},
+        "call_steps": [
+            {
+                "type": "queue",
+                "id": 20,
+                "name": "Reklamacije - CRO",
+                "status": "answered",
+                "strategy": "rrmemory",
+                "date": "2026-03-03T11:00:05Z",
+                "call_times": {"total_time": 180, "talking_time": 180, "ringing_time": 0},
+                "agent_calls": [
+                    {
+                        "type": "agent",
+                        "id": 99,
+                        "name": "Marko Horvat",
+                        "status": "answered",
+                        "date": "2026-03-03T11:00:10Z",
+                        "call_times": {
+                            "total_time": 180,
+                            "talking_time": 180,
+                            "ringing_time": 5,
+                            "waiting_time": 5,
+                            "holding_time": 0,
+                            "wrap_up_time": 0,
+                        },
+                        "group_ids": [20],
+                    }
+                ],
+            },
+        ],
+        "notes": [],
+        "recorded": True,
+        "out_of_office": False,
+    }
 
 
 @pytest.fixture
-def sample_groups_dim() -> list[dict]:
-    """Transformed group records (post transform_groups_dim)."""
-    return [
-        {"id": 10, "internal_name": "Reklamacije SLO"},
-        {"id": 11, "internal_name": "Svetovanje HR"},
-    ]
-
-
-@pytest.fixture
-def sample_number_lookup(sample_numbers, sample_groups_dim):
-    """Pre-built number lookup dict."""
-    from cloudtalk_etl.etl.transform import build_number_lookup
-    return build_number_lookup(sample_numbers, sample_groups_dim)
+def sample_call_detail_no_queue() -> dict:
+    """A call detail with no queue step — uses internal_number as fallback."""
+    return {
+        "cdr_id": 100004,
+        "uuid": "jkl-012",
+        "date": "2026-03-03T12:00:00Z",
+        "status": "missed",
+        "direction": "incoming",
+        "type": "regular",
+        "contact": {"id": 0, "name": None, "country": "SI", "number": "+38641000003"},
+        "internal_number": {"id": 9, "name": "Info - SLO", "number": "+38612000000"},
+        "call_tags": [],
+        "call_times": {"total_time": 5, "talking_time": 0, "ringing_time": 5},
+        "call_steps": [
+            {"type": "ivr", "name": "Auto-attendant"},
+        ],
+        "notes": [],
+        "recorded": False,
+        "out_of_office": False,
+    }

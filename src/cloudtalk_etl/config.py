@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     cloudtalk_api_key_id: str
     cloudtalk_api_key_secret: str
     cloudtalk_api_base_url: str = "https://my.cloudtalk.io/api"
+    cloudtalk_analytics_api_base_url: str = "https://analytics-api.cloudtalk.io/api"
 
     # Database
     database_url: str  # Full Neon connection string with sslmode=require
@@ -23,7 +24,6 @@ class Settings(BaseSettings):
     rate_limit_rpm: int = Field(default=50, ge=1, le=55)
     log_level: str = "INFO"
     etl_date_override: str | None = None  # YYYY-MM-DD format, None = yesterday
-    enable_conversation_intelligence: bool = False
     test_mode: bool = False  # Fetch only 1 page / 10 records per endpoint for quick dry runs
 
     # Retry settings

@@ -90,10 +90,12 @@ class CloudTalkClient:
         base_url: str,
         rate_limiter: TokenBucketRateLimiter,
         max_retries: int = 5,
+        analytics_base_url: str = "https://analytics-api.cloudtalk.io/api",
         http_client: httpx.Client | None = None,
     ) -> None:
         self._auth = (api_key_id, api_key_secret)
         self._base_url = base_url.rstrip("/")
+        self._analytics_base_url = analytics_base_url.rstrip("/")
         self._rate_limiter = rate_limiter
         self._max_retries = max_retries
         self._client = http_client or httpx.Client(
@@ -123,11 +125,27 @@ class CloudTalkClient:
             reraise=True,
         )
         def _attempt() -> dict:
-            return self._do_request(method, endpoint, params)
+            return self._do_request(method, endpoint, params, base_url=None)
 
         return _attempt()
 
-    def _do_request(self, method: str, endpoint: str, params: dict | None) -> dict:
+    def _request_analytics(self, method: str, endpoint: str, params: dict | None = None) -> dict:
+        """Like _request but uses the analytics API base URL."""
+        @retry(
+            stop=stop_after_attempt(self._max_retries),
+            wait=wait_exponential_jitter(initial=2, max=60, jitter=2),
+            retry=retry_if_exception_type(
+                (CloudTalkRateLimitError, CloudTalkServerError, httpx.TransportError)
+            ),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )
+        def _attempt() -> dict:
+            return self._do_request(method, endpoint, params, base_url=self._analytics_base_url)
+
+        return _attempt()
+
+    def _do_request(self, method: str, endpoint: str, params: dict | None, base_url: str | None = None) -> dict:
         """
         Execute a single HTTP request (no retry logic here -- that's in _request).
 
@@ -138,7 +156,7 @@ class CloudTalkClient:
         """
         self._rate_limiter.wait()  # block until we have capacity
 
-        url = f"{self._base_url}{endpoint}"
+        url = f"{base_url or self._base_url}{endpoint}"
         response = self._client.request(method, url, params=params, auth=self._auth)
 
         # -- 429 Too Many Requests --------------------------------------
@@ -281,6 +299,21 @@ class CloudTalkClient:
             "/tags/index.json",
             params={"page": page, "limit": limit},
         )
+
+    def get_call_detail(self, call_id: int) -> dict:
+        """
+        Fetch full detail for a single call including call_steps and agent_calls.
+
+        Uses the analytics API base URL (analytics-api.cloudtalk.io/api) which
+        returns the comprehensive call flow including QueueStep, AgentStep data.
+
+        Args:
+            call_id: The numeric call ID from the index response (Cdr.id).
+
+        Returns:
+            Raw API response dict with call detail including call_steps.
+        """
+        return self._request_analytics("GET", f"/calls/{call_id}")
 
     # ------------------------------------------------------------------
     # Generic paginator

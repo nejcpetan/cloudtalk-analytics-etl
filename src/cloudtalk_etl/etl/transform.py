@@ -5,6 +5,10 @@ from datetime import date, datetime
 logger = structlog.get_logger()
 
 
+# ===========================================================================
+# Utility helpers (reused across transforms)
+# ===========================================================================
+
 def safe_int(value, default: int = 0) -> int:
     """Safely convert a value to int."""
     try:
@@ -32,436 +36,260 @@ def parse_timestamp(value: str | None) -> str | None:
         return None
 
 
-def transform_calls(raw_calls: list[dict], sync_date: date) -> list[dict]:
+def format_date_eu(d: date) -> str:
+    """Format a date as DD.MM.YYYY string for QlikSense output."""
+    return d.strftime("%d.%m.%Y")
+
+
+_KNOWN_COUNTRIES = {"SLO", "CRO"}
+
+
+def parse_group_name(group_name: str) -> tuple[str, str]:
     """
-    Transform raw CloudTalk call data into flat dictionaries
-    ready for database insertion.
+    Parse a CloudTalk group name into (country, category).
+
+    Supported formats:
+    - "Category - SLO" or "Category - CRO"  → (SLO/CRO, Category)
+    - "(SLO) Category" or "(CRO) Category"  → (SLO/CRO, Category)
+    Falls back to ('UNKNOWN', original_name) with a warning log.
     """
-    transformed = []
+    if not group_name:
+        return ("UNKNOWN", group_name or "")
 
-    for record in raw_calls:
-        cdr = record.get("Cdr", {})
-        contact = record.get("Contact", {})
-        agent = record.get("Agent", {})
+    # Format: "Category - COUNTRY" (country is the last segment after " - ")
+    delimiter = " - "
+    idx = group_name.rfind(delimiter)
+    if idx != -1:
+        suffix = group_name[idx + len(delimiter):].strip()
+        if suffix in _KNOWN_COUNTRIES:
+            return (suffix, group_name[:idx].strip())
 
-        answered_at = parse_timestamp(cdr.get("answered_at"))
-        call_status = "answered" if answered_at else "missed"
+    # Format: "(COUNTRY) Category"
+    if group_name.startswith("("):
+        close = group_name.find(")")
+        if close != -1:
+            country = group_name[1:close].strip()
+            if country in _KNOWN_COUNTRIES:
+                return (country, group_name[close + 1:].strip())
 
-        started_at = parse_timestamp(cdr.get("started_at"))
-        call_date = sync_date  # Use sync_date as fallback
-
-        if started_at:
-            try:
-                dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                call_date = dt.date()
-            except ValueError:
-                pass
-
-        transformed.append({
-            "id": safe_int(cdr.get("id")),
-            "call_type": cdr.get("type", "unknown"),
-            "billsec": safe_int(cdr.get("billsec")),
-            "talking_time": safe_int(cdr.get("talking_time")),
-            "waiting_time": safe_int(cdr.get("waiting_time")),
-            "wrapup_time": safe_int(cdr.get("wrapup_time")),
-            "public_external": str(cdr.get("public_external", "")) or None,
-            "public_internal": str(cdr.get("public_internal", "")) or None,
-            "country_code": cdr.get("country_code"),
-            "recorded": bool(cdr.get("recorded", False)),
-            "is_voicemail": bool(cdr.get("is_voicemail", False)),
-            "is_redirected": bool(cdr.get("is_redirected", False)
-                                  if cdr.get("is_redirected") != "0" else False),
-            "redirected_from": cdr.get("redirected_from") or None,
-            "user_id": str(cdr.get("user_id")) if cdr.get("user_id") is not None else None,
-            "started_at": started_at,
-            "answered_at": answered_at,
-            "ended_at": parse_timestamp(cdr.get("ended_at")),
-            "recording_link": cdr.get("recording_link"),
-            "call_status": call_status,
-            "call_date": call_date,
-            "contact_id": str(contact.get("id", "")) or None,
-            "contact_name": contact.get("name") or None,
-            "contact_company": contact.get("company") or None,
-            "agent_id": str(agent.get("id")) if agent.get("id") is not None else None,
-            "agent_name": agent.get("fullname") or None if agent.get("id") is not None else None,
-        })
-
-    logger.info("calls_transformed", count=len(transformed))
-    return transformed
+    logger.warning("group_name_parse_failed", group_name=group_name)
+    return ("UNKNOWN", group_name)
 
 
-def transform_agents(raw_agents: list[dict], sync_date: date) -> list[dict]:
-    """Transform raw CloudTalk agent data."""
-    transformed = []
+def _get_group_name_from_detail(detail: dict) -> str | None:
+    """
+    Extract the authoritative group name from a call detail response.
 
-    for record in raw_agents:
-        agent = record.get("Agent", {})
-        firstname = agent.get("firstname", "")
-        lastname = agent.get("lastname", "")
+    Looks for the first QueueStep in call_steps. Falls back to
+    internal_number.name if no queue step is found.
+    """
+    call_steps = detail.get("call_steps") or []
+    for step in call_steps:
+        if step.get("type") == "queue":
+            name = step.get("name")
+            if name:
+                return name
 
-        transformed.append({
-            "id": str(agent.get("id", "")),
-            "sync_date": sync_date,
-            "firstname": firstname or None,
-            "lastname": lastname or None,
-            "fullname": f"{firstname} {lastname}".strip() or None,
-            "email": agent.get("email") or None,
-            "availability_status": agent.get("availability_status") or None,
-            "extension": agent.get("extension") or None,
-            "default_number": agent.get("default_number") or None,
-            "associated_numbers": agent.get("associated_numbers", []),
-        })
+    # Fallback: use internal_number name
+    internal_number = detail.get("internal_number") or {}
+    name = internal_number.get("name")
+    if name:
+        return name
 
-    logger.info("agents_transformed", count=len(transformed))
-    return transformed
-
-
-def transform_group_stats(raw_stats: list[dict], sync_date: date) -> list[dict]:
-    """Transform raw CloudTalk group statistics."""
-    transformed = []
-
-    for group in raw_stats:
-        real_time = group.get("real_time", {})
-
-        transformed.append({
-            "group_id": safe_int(group.get("id")),
-            "group_name": group.get("name", "Unknown"),
-            "sync_date": sync_date,
-            "operators": safe_int(group.get("operators")),
-            "answered": safe_int(group.get("answered")),
-            "unanswered": safe_int(group.get("unanswered")),
-            "abandon_rate": safe_float(group.get("abandon_rate")),
-            "avg_waiting_time": safe_int(group.get("avg_waiting_time")),
-            "max_waiting_time": safe_int(group.get("max_waiting_time")),
-            "avg_call_duration": safe_int(group.get("avg_call_duration")),
-            "rt_waiting_queue": safe_int(real_time.get("waiting_queue")),
-            "rt_avg_waiting_time": safe_int(real_time.get("avg_waiting_time")),
-            "rt_max_waiting_time": safe_int(real_time.get("max_waiting_time")),
-            "rt_avg_abandonment_time": safe_int(
-                real_time.get("avg_abandonment_time")
-            ),
-        })
-
-    logger.info("group_stats_transformed", count=len(transformed))
-    return transformed
+    return None
 
 
 # ===========================================================================
-# Phase 2: Dimension transforms
+# Output table transforms
 # ===========================================================================
 
-def transform_numbers(raw_numbers: list[dict]) -> list[dict]:
-    """
-    Transform raw /numbers/index.json records into flat dicts for numbers_dim.
-
-    Each API record is wrapped in a "CallNumber" key.
-    source_id is not provided by the API and will be None.
-    """
-    transformed = []
-
-    for item in raw_numbers:
-        cn = item.get("CallNumber", {})
-        connected_to_val = cn.get("connected_to")
-        transformed.append({
-            "id": safe_int(cn.get("id")),
-            "internal_name": cn.get("internal_name") or None,
-            "caller_id_e164": cn.get("caller_id_e164") or None,
-            "country_code": safe_int(cn.get("country_code")) or None,
-            "connected_to": int(connected_to_val) if connected_to_val is not None else None,
-            "source_id": safe_int(cn.get("source_id")) or None,
-        })
-
-    logger.info("numbers_transformed", count=len(transformed))
-    return transformed
-
-
-def transform_groups_dim(raw_groups: list[dict]) -> list[dict]:
-    """
-    Transform raw /groups/index.json records into flat dicts for groups_dim.
-
-    Each API record is wrapped in a "Group" key.
-    Skips placeholder rows (id=0 or null internal_name) that the API may return.
-    """
-    transformed = []
-
-    for item in raw_groups:
-        group = item.get("Group", {})
-        group_id = safe_int(group.get("id"))
-        internal_name = group.get("internal_name") or None
-        if not group_id or not internal_name:
-            continue  # skip id=0 / unnamed placeholder groups
-        transformed.append({"id": group_id, "internal_name": internal_name})
-
-    logger.info("groups_dim_transformed", count=len(transformed))
-    return transformed
-
-
-def transform_tags(raw_tags: list[dict]) -> list[dict]:
-    """
-    Transform raw /tags/index.json records into flat dicts for tags_dim.
-
-    Each API record is wrapped in a "Tag" key.
-    Skips placeholder rows (id=0 or null name) that the API may return.
-    """
-    transformed = []
-
-    for item in raw_tags:
-        tag = item.get("Tag", {})
-        tag_id = safe_int(tag.get("id"))
-        name = tag.get("name") or None
-        if not tag_id or not name:
-            continue  # skip unnamed / zero-id placeholders
-        transformed.append({"id": tag_id, "name": name})
-
-    logger.info("tags_transformed", count=len(transformed))
-    return transformed
-
-
-def build_number_lookup(numbers: list[dict], groups: list[dict]) -> dict:
-    """
-    Build a lookup dict mapping number_id (int) to routing info.
-
-    Only numbers connected to a group (connected_to == 0) will have a group_id.
-    Numbers connected to agents or conferences will have group_id=None.
-
-    Returns:
-        {number_id: {"group_id": int|None, "group_name": str|None, "country_code": int|None}}
-    """
-    group_names = {g["id"]: g["internal_name"] for g in groups}
-    lookup: dict[int, dict] = {}
-
-    for n in numbers:
-        number_id = n.get("id")
-        if number_id is None:
-            continue
-
-        group_id = n.get("source_id") if n.get("connected_to") == 0 else None
-        lookup[number_id] = {
-            "group_id": group_id,
-            "group_name": group_names.get(group_id) if group_id else None,
-            "country_code": n.get("country_code"),
-        }
-
-    return lookup
-
-
-# ===========================================================================
-# Phase 2: Fact / aggregation transforms
-# ===========================================================================
-
-def transform_call_tags(raw_calls: list[dict]) -> list[dict]:
-    """
-    Extract call-tag pairs from raw call records.
-
-    Each call can have multiple tags. Returns one dict per (call_id, tag_id) pair.
-    Tags are the "Tags" top-level key on each raw call record.
-    """
-    result = []
-
-    for record in raw_calls:
-        cdr = record.get("Cdr", {})
-        call_id = safe_int(cdr.get("id"))
-        if not call_id:
-            continue
-
-        tags = record.get("Tags", []) or []
-        for tag in tags:
-            tag_id = safe_int(tag.get("id"))
-            if not tag_id:
-                continue
-            result.append({
-                "call_id": call_id,
-                "tag_id": tag_id,
-                "tag_name": tag.get("name") or None,
-            })
-
-    logger.info("call_tags_transformed", count=len(result))
-    return result
-
-
-def transform_call_center_daily_stats(
-    raw_calls: list[dict],
+def transform_call_center_groups(
+    call_details: dict[int, dict],
     sync_date: date,
 ) -> list[dict]:
     """
-    Aggregate raw call records into per-number (call center line) per-day statistics.
+    Aggregate call detail data into per-group daily statistics.
 
-    Uses CallNumber embedded in each call directly — no external lookup needed.
-    Calls without a valid CallNumber.id are silently skipped.
+    Uses QueueStep.name as the authoritative group source. Falls back to
+    internal_number.name. Calls without a resolvable group are skipped.
 
     Args:
-        raw_calls:  Raw call records from /calls/index.json.
-        sync_date:  The date being synced.
+        call_details: Dict mapping call_id -> detail response.
+        sync_date:    The date being synced.
 
     Returns:
-        List of aggregated stat dicts ready for call_center_daily_stats upsert.
+        List of aggregated dicts ready for call_center_groups upsert.
     """
-    # {number_id: {group_name, country_code, total, answered, missed}}
-    buckets: dict[int, dict] = {}
+    # {group_name: {total, answered, unanswered}}
+    buckets: dict[str, dict] = {}
 
-    for record in raw_calls:
-        cdr = record.get("Cdr", {})
-        call_number = record.get("CallNumber", {})
+    for call_id, detail in call_details.items():
+        group_name = _get_group_name_from_detail(detail)
+        if not group_name:
+            logger.warning("call_no_group_skipped", call_id=call_id)
+            continue
 
-        number_id = safe_int(call_number.get("id")) or None
-        if not number_id:
-            continue  # skip calls without a routable number
+        status = detail.get("status", "")
 
-        group_name = call_number.get("internal_name") or "Unknown"
-        country_code = safe_int(call_number.get("country_code")) or None
+        if group_name not in buckets:
+            buckets[group_name] = {"total": 0, "answered": 0, "unanswered": 0}
 
-        if number_id not in buckets:
-            buckets[number_id] = {
-                "group_name": group_name,
-                "country_code": country_code,
-                "total": 0,
-                "answered": 0,
-                "missed": 0,
-            }
-
-        buckets[number_id]["total"] += 1
-        if cdr.get("answered_at"):
-            buckets[number_id]["answered"] += 1
+        buckets[group_name]["total"] += 1
+        if status == "answered":
+            buckets[group_name]["answered"] += 1
         else:
-            buckets[number_id]["missed"] += 1
+            buckets[group_name]["unanswered"] += 1
 
+    date_str = format_date_eu(sync_date)
     result = []
-    for number_id, data in buckets.items():
+    for group_name, data in buckets.items():
+        country, category = parse_group_name(group_name)
         total = data["total"]
         answered = data["answered"]
-        answer_rate = round(answered / total * 100, 2) if total > 0 else 0.0
+        answered_pct = round(answered / total * 100, 2) if total > 0 else None
         result.append({
-            "sync_date": sync_date,
-            "group_id": number_id,  # number_id used as group surrogate key
-            "group_name": data["group_name"],
-            "country_code": data["country_code"],
+            "date": date_str,
+            "country": country,
+            "group_name": group_name,
+            "category": category,
             "total_calls": total,
             "answered_calls": answered,
-            "missed_calls": data["missed"],
-            "callback_calls": 0,  # Phase 2B enrichment
-            "answer_rate_pct": answer_rate,
+            "answered_pct": answered_pct,
+            "unanswered_calls": data["unanswered"],
         })
 
-    logger.info("call_center_daily_stats_transformed",
-                count=len(result), sync_date=str(sync_date))
+    logger.info("call_center_groups_transformed", count=len(result), sync_date=str(sync_date))
     return result
 
 
-def transform_agent_daily_stats(
-    raw_calls: list[dict],
+def transform_agent_stats(
+    call_details: dict[int, dict],
     sync_date: date,
 ) -> list[dict]:
     """
-    Aggregate raw call records into per-agent per-day statistics.
+    Aggregate per-agent call statistics from call detail call_steps.
 
-    Only calls with a user_id (i.e. answered by an agent) contribute.
-    presented_calls is initialised to 0 (Phase 2B enrichment via analytics API).
-
-    Args:
-        raw_calls:  Raw call records from /calls/index.json.
-        sync_date:  The date being synced.
-
-    Returns:
-        List of aggregated stat dicts ready for agent_daily_stats upsert.
-    """
-    # {agent_id: {agent_name, answered, talk_seconds}}
-    buckets: dict[int, dict] = {}
-
-    for record in raw_calls:
-        cdr = record.get("Cdr", {})
-        agent = record.get("Agent", {})
-
-        user_id = cdr.get("user_id")
-        if user_id is None:
-            continue  # missed call with no answering agent
-
-        agent_id = safe_int(user_id)
-        if agent_id == 0:
-            continue
-
-        if agent_id not in buckets:
-            buckets[agent_id] = {
-                "agent_name": agent.get("fullname") or None,
-                "answered": 0,
-                "talk_seconds": 0,
-            }
-
-        if cdr.get("answered_at"):
-            buckets[agent_id]["answered"] += 1
-
-        buckets[agent_id]["talk_seconds"] += safe_int(cdr.get("talking_time"))
-
-    result = []
-    for agent_id, data in buckets.items():
-        result.append({
-            "sync_date": sync_date,
-            "agent_id": agent_id,
-            "agent_name": data["agent_name"],
-            "presented_calls": 0,  # Phase 2B
-            "answered_calls": data["answered"],
-            "total_talk_seconds": data["talk_seconds"],
-        })
-
-    logger.info("agent_daily_stats_transformed",
-                count=len(result), sync_date=str(sync_date))
-    return result
-
-
-def transform_call_reasons_daily(
-    raw_calls: list[dict],
-    sync_date: date,
-) -> list[dict]:
-    """
-    Aggregate tag usage counts per call center number per day.
-
-    Crosses call tags with the CallNumber each call came through, producing a
-    count of how many times each tag was used per number on the given day.
+    For each QueueStep in call_steps, reads agent_calls to get which agents
+    were presented the call, who answered, and how long they talked.
 
     Args:
-        raw_calls:  Raw call records from /calls/index.json.
-        sync_date:  The date being synced.
+        call_details: Dict mapping call_id -> detail response.
+        sync_date:    The date being synced.
 
     Returns:
-        List of aggregated reason dicts ready for call_reasons_daily upsert.
+        List of aggregated dicts ready for agent_stats upsert.
+        PK: (date, country, group_name, agent_id)
     """
-    # {(number_id, tag_id): {group_name, tag_name, count}}
+    # {(group_name, agent_id): {agent_name, presented, answered, talk_sec}}
     buckets: dict[tuple, dict] = {}
 
-    for record in raw_calls:
-        call_number = record.get("CallNumber", {})
+    for call_id, detail in call_details.items():
+        call_steps = detail.get("call_steps") or []
 
-        number_id = safe_int(call_number.get("id")) or None
-        if not number_id:
+        for step in call_steps:
+            if step.get("type") != "queue":
+                continue
+
+            group_name = step.get("name") or ""
+            if not group_name:
+                continue
+
+            agent_calls = step.get("agent_calls") or []
+            for agent_step in agent_calls:
+                agent_id = safe_int(agent_step.get("id"))
+                if not agent_id:
+                    continue
+
+                key = (group_name, agent_id)
+                if key not in buckets:
+                    buckets[key] = {
+                        "agent_name": agent_step.get("name") or None,
+                        "presented": 0,
+                        "answered": 0,
+                        "talk_sec": 0,
+                    }
+
+                buckets[key]["presented"] += 1
+
+                if agent_step.get("status") == "answered":
+                    buckets[key]["answered"] += 1
+                    call_times = agent_step.get("call_times") or {}
+                    buckets[key]["talk_sec"] += safe_int(call_times.get("talking_time"))
+
+    date_str = format_date_eu(sync_date)
+    result = []
+    for (group_name, agent_id), data in buckets.items():
+        country, category = parse_group_name(group_name)
+        result.append({
+            "date": date_str,
+            "country": country,
+            "group_name": group_name,
+            "category": category,
+            "agent_id": agent_id,
+            "agent_name": data["agent_name"],
+            "presented_calls": data["presented"],
+            "answered_calls": data["answered"],
+            "talking_time_sec": data["talk_sec"],
+        })
+
+    logger.info("agent_stats_transformed", count=len(result), sync_date=str(sync_date))
+    return result
+
+
+def transform_call_reasons(
+    call_details: dict[int, dict],
+    sync_date: date,
+) -> list[dict]:
+    """
+    Aggregate tag (call reason) usage counts per group per day.
+
+    For each call, reads call_tags and associates them with the group
+    from the first QueueStep. Calls without a group or tags are skipped.
+
+    Args:
+        call_details: Dict mapping call_id -> detail response.
+        sync_date:    The date being synced.
+
+    Returns:
+        List of aggregated dicts ready for call_reasons upsert.
+        PK: (date, country, group_name, tag_id)
+    """
+    # {(group_name, tag_id): {tag_name, count}}
+    buckets: dict[tuple, dict] = {}
+
+    for call_id, detail in call_details.items():
+        group_name = _get_group_name_from_detail(detail)
+        if not group_name:
             continue
 
-        group_name = call_number.get("internal_name") or "Unknown"
-
-        tags = record.get("Tags", []) or []
-        for tag in tags:
+        call_tags = detail.get("call_tags") or []
+        for tag in call_tags:
             tag_id = safe_int(tag.get("id"))
             if not tag_id:
                 continue
 
-            key = (number_id, tag_id)
+            key = (group_name, tag_id)
             if key not in buckets:
+                # The detail response uses "label" not "name" for tag text
                 buckets[key] = {
-                    "group_name": group_name,
-                    "tag_name": tag.get("name") or None,
+                    "tag_name": tag.get("label") or None,
                     "count": 0,
                 }
             buckets[key]["count"] += 1
 
+    date_str = format_date_eu(sync_date)
     result = []
-    for (number_id, tag_id), data in buckets.items():
+    for (group_name, tag_id), data in buckets.items():
+        country, category = parse_group_name(group_name)
         result.append({
-            "sync_date": sync_date,
-            "group_id": number_id,  # number_id used as group surrogate key
-            "group_name": data["group_name"],
+            "date": date_str,
+            "country": country,
+            "group_name": group_name,
+            "category": category,
             "tag_id": tag_id,
             "tag_name": data["tag_name"],
             "call_count": data["count"],
         })
 
-    logger.info("call_reasons_daily_transformed",
-                count=len(result), sync_date=str(sync_date))
+    logger.info("call_reasons_transformed", count=len(result), sync_date=str(sync_date))
     return result

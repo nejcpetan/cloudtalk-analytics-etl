@@ -4,6 +4,7 @@ set -e
 CRON_SCHEDULE="${CRON_SCHEDULE:-0 2 * * *}"
 
 echo "CloudTalk ETL Service starting..."
+echo "Code version: ${GIT_COMMIT:-unknown} | Built: ${BUILD_DATE:-unknown}"
 echo "Schedule: ${CRON_SCHEDULE}"
 echo "Log level: ${LOG_LEVEL:-INFO}"
 

@@ -1,3 +1,4 @@
+import time
 import structlog
 from datetime import date
 
@@ -5,11 +6,14 @@ from cloudtalk_etl.api.client import CloudTalkClient
 
 logger = structlog.get_logger()
 
+# Minimum delay between /calls/{callId} detail requests to stay within 60 req/min
+_DETAIL_THROTTLE_SECONDS = 1.05
+
 
 def extract_calls(client: CloudTalkClient, sync_date: date,
                   test_mode: bool = False) -> list[dict]:
     """
-    Extract all calls for a given date.
+    Extract all calls for a given date from the index endpoint.
 
     Uses date_from (start of day) and date_to (end of day) filters.
     Handles pagination automatically.
@@ -33,49 +37,62 @@ def extract_calls(client: CloudTalkClient, sync_date: date,
     return calls
 
 
-def extract_agents(client: CloudTalkClient, test_mode: bool = False) -> list[dict]:
-    """Extract all agents."""
-    logger.info("extracting_agents", test_mode=test_mode)
+def extract_call_details(client: CloudTalkClient, raw_calls: list[dict],
+                         test_mode: bool = False) -> dict[int, dict]:
+    """
+    Fetch detailed call data for each call from the analytics API.
 
-    agents = client.get_all_pages(
-        client.get_agents,
-        max_pages=1 if test_mode else None,
-        limit=10 if test_mode else 1000,
-    )
+    Calls GET /calls/{callId} for each call in raw_calls, throttled at
+    1050ms between requests to stay within the 60 req/min API limit.
+    Individual failures are logged and skipped — the returned dict will
+    simply be missing that call_id.
 
-    logger.info("agents_extracted", count=len(agents))
-    return agents
+    Args:
+        client:     CloudTalk API client.
+        raw_calls:  Raw call index records (each has a Cdr.id field).
+        test_mode:  If True, fetch only the first 10 call details.
+
+    Returns:
+        Dict mapping call_id (int) -> detail response dict.
+    """
+    call_ids = []
+    for record in raw_calls:
+        cdr = record.get("Cdr", {})
+        call_id = cdr.get("id")
+        if call_id is not None:
+            try:
+                call_ids.append(int(call_id))
+            except (ValueError, TypeError):
+                pass
+
+    if test_mode:
+        call_ids = call_ids[:10]
+
+    logger.info("extracting_call_details", total=len(call_ids))
+
+    details: dict[int, dict] = {}
+    for i, call_id in enumerate(call_ids):
+        if i > 0:
+            time.sleep(_DETAIL_THROTTLE_SECONDS)
+
+        try:
+            detail = client.get_call_detail(call_id)
+            details[call_id] = detail
+        except Exception:
+            logger.warning("call_detail_fetch_failed", call_id=call_id)
+
+    logger.info("call_details_extracted", fetched=len(details), skipped=len(call_ids) - len(details))
+    return details
 
 
-def extract_group_stats(client: CloudTalkClient) -> list[dict]:
-    """Extract group statistics snapshot."""
-    logger.info("extracting_group_stats")
-
-    response = client.get_group_stats()
-    groups = response.get("responseData", {}).get("data", {}).get("groups", [])
-
-    logger.info("group_stats_extracted", count=len(groups))
-    return groups
-
-
-def extract_groups_dim(client: CloudTalkClient) -> list[dict]:
-    """Extract all groups for the groups dimension table."""
-    logger.info("extracting_groups_dim")
+def extract_groups(client: CloudTalkClient) -> list[dict]:
+    """Extract all call center groups."""
+    logger.info("extracting_groups")
 
     groups = client.get_all_pages(client.get_groups, limit=1000)
 
-    logger.info("groups_dim_extracted", count=len(groups))
+    logger.info("groups_extracted", count=len(groups))
     return groups
-
-
-def extract_numbers(client: CloudTalkClient) -> list[dict]:
-    """Extract all phone numbers with their routing configuration."""
-    logger.info("extracting_numbers")
-
-    numbers = client.get_all_pages(client.get_numbers, limit=1000)
-
-    logger.info("numbers_extracted", count=len(numbers))
-    return numbers
 
 
 def extract_tags(client: CloudTalkClient) -> list[dict]:
