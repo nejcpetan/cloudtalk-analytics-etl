@@ -19,8 +19,11 @@ WORKDIR /app
 # Copy everything needed to build and install the package
 COPY pyproject.toml ./
 COPY src/ ./src/
+# Default installs PostgreSQL driver only.
+# For MySQL: build with --build-arg INSTALL_TARGET='.[mysql]'
+ARG INSTALL_TARGET="."
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir "$INSTALL_TARGET"
 
 COPY scripts/ ./scripts/
 

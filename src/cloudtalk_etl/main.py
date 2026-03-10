@@ -6,8 +6,7 @@ from datetime import date, timedelta
 from cloudtalk_etl.config import Settings
 from cloudtalk_etl.api.client import CloudTalkClient
 from cloudtalk_etl.api.rate_limiter import TokenBucketRateLimiter
-from cloudtalk_etl.db.connection import get_connection
-from cloudtalk_etl.db.schema import ensure_schema
+from cloudtalk_etl.db.backend import get_connection, ensure_schema
 from cloudtalk_etl.etl.extract import (
     extract_calls,
     extract_call_details,

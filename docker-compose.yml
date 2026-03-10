@@ -1,5 +1,11 @@
 services:
   cloudtalk-etl:
+    # PostgreSQL (default): build: .
+    # MySQL: uncomment the block below instead:
+    # build:
+    #   context: .
+    #   args:
+    #     INSTALL_TARGET: ".[mysql]"
     build: .
     container_name: cloudtalk-etl
     restart: unless-stopped
@@ -8,6 +14,7 @@ services:
       - CLOUDTALK_API_KEY_ID=${CLOUDTALK_API_KEY_ID}
       - CLOUDTALK_API_KEY_SECRET=${CLOUDTALK_API_KEY_SECRET}
       - DATABASE_URL=${DATABASE_URL}
+      - DB_BACKEND=${DB_BACKEND:-postgresql}   # "postgresql" or "mysql"
       - CRON_SCHEDULE=${CRON_SCHEDULE:-0 2 * * *}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - RATE_LIMIT_RPM=${RATE_LIMIT_RPM:-50}

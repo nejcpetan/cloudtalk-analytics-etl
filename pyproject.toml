@@ -19,6 +19,9 @@ dev = [
     "pytest-httpx>=0.35",
     "ruff>=0.9",
 ]
+mysql = [
+    "mysql-connector-python>=9.0,<10",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

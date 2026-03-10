@@ -1,7 +1,7 @@
 # CloudTalk Analytics ETL Service
 
 Nightly ETL service that extracts call, agent, and group statistics data from the
-**CloudTalk REST API (v1.7)** and loads it into a **Neon PostgreSQL** database for
+**CloudTalk REST API** and loads it into a **PostgreSQL** (Neon or MySQL) database for
 consumption by Qlik Sense BI dashboards.
 
 Runs on a cron schedule (default: 02:00 Europe/Ljubljana) inside Docker via `supercronic`.
@@ -16,13 +16,13 @@ Deployed and managed through Portainer.
 3. [Project Structure](#project-structure)
 4. [Database Schema](#database-schema)
 5. [Environment Variables](#environment-variables)
-6. [Local Development Setup](#local-development-setup)
-7. [Running Tests](#running-tests)
-8. [Docker / Deployment](#docker--deployment)
-9. [Operations — Day to Day](#operations--day-to-day)
-10. [Backfilling Historical Data](#backfilling-historical-data)
-11. [Troubleshooting](#troubleshooting)
-12. [Future Work](#future-work)
+6. [Database Backend — PostgreSQL vs MySQL](#database-backend--postgresql-vs-mysql)
+7. [Local Development Setup](#local-development-setup)
+8. [Running Tests](#running-tests)
+9. [Docker / Deployment](#docker--deployment)
+10. [Operations — Day to Day](#operations--day-to-day)
+11. [Backfilling Historical Data](#backfilling-historical-data)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -32,50 +32,45 @@ Deployed and managed through Portainer.
 
 Every night at 02:00 the container wakes up and runs a Python ETL pipeline that:
 
-1. **Extracts** the previous day's calls, agents, and group stats from the CloudTalk API
-2. **Transforms** the raw JSON into clean, flat rows (type coercion, null handling, status derivation)
-3. **Loads** the rows into Neon PostgreSQL using `INSERT ... ON CONFLICT DO UPDATE` upserts
+1. **Extracts** the previous day's call index from the CloudTalk API
+2. **Fetches details** for each call from the analytics API — this is the authoritative source for group names and per-agent step data (throttled at 1050ms per request to stay within the 60 req/min limit)
+3. **Transforms** the raw JSON into clean, flat rows aggregated across 3 output tables
+4. **Loads** the rows into PostgreSQL (Neon or MySQL) using upserts
 
 The job syncs **yesterday** by default (e.g. running at 02:00 on March 5th syncs all of March 4th).
 This guarantees a complete day is always captured before the job runs.
 
 ### What data is captured
 
-| Data | API endpoint | Frequency | Notes |
-|------|-------------|-----------|-------|
-| Calls (CDRs) | `/calls` | Daily | Every call with status, duration, agent, contact |
-| Agents | `/agents` | Daily snapshot | Agent list with availability and extension info |
-| Group statistics | `/statistic/groups` | Daily snapshot | Queue-level KPIs (answered, abandon rate, wait times) |
+| Table | Source | Granularity |
+|-------|--------|-------------|
+| `call_center_groups` | `/calls/{callId}` detail, `QueueStep.name` | One row per (date, group) |
+| `agent_stats` | `/calls/{callId}` detail, `QueueStep.agent_calls` | One row per (date, group, agent) |
+| `call_reasons` | `/calls/{callId}` detail, `call_tags[].label` | One row per (date, group, tag) |
 
-### Call status logic
+### Group assignment
 
-CloudTalk does not provide a `missed/answered` field directly. The ETL derives it:
-- If `answered_at` is a valid timestamp → `answered`
-- If `answered_at` is null or `"0"` → `missed`
+The authoritative group name for each call comes from the first `QueueStep.name` in the
+call's `call_steps` array (fetched from the detail endpoint). If a call has no queue step,
+the `internal_number.name` is used as a fallback. Calls where neither is available are
+silently skipped (not counted in any group).
 
-### Agent-to-call linkage
-
-Each call record from the API contains an embedded `Agent` object. The ETL extracts
-`agent_id` and `agent_name` directly onto the `calls` row, so no join is needed for
-basic agent attribution.
-
-Calls where `agent_id IS NULL` are calls that were answered by the IVR system but
-where no human agent picked up (caller navigated the menu then hung up). This is
-expected and not a bug — CloudTalk itself reports no agent for these.
+Group names follow the format `"Category - SLO"` or `"Category - CRO"`. The ETL parses
+these into `country` (`SLO`/`CRO`) and `category` columns automatically. Phone line groups
+in parenthesis format `(SLO) Name` are filtered out as junk.
 
 ### Rate limiting and retries
 
-CloudTalk's API enforces a 60 req/min limit. The ETL uses a **token bucket rate
-limiter** set to 50 req/min (a safety margin). On top of that, all API calls are
-wrapped with **tenacity** retries: up to 5 attempts with exponential backoff + jitter,
-handling transient 5xx errors and 429 rate-limit responses.
+CloudTalk's API enforces a 60 req/min limit. The ETL uses a **token bucket rate limiter**
+set to 50 req/min (a safety margin). Additionally, detail fetches have a hard 1050ms minimum
+delay between requests. All API calls are wrapped with **tenacity** retries: up to 5 attempts
+with exponential backoff + jitter, handling transient 5xx errors and 429 responses.
 
 ### Upserts, not deletes
 
-All writes use `ON CONFLICT DO UPDATE`. This means:
-- Re-running the ETL for the same date is always safe — no duplicate rows
-- Historical data is never destroyed by a re-run
-- Calls have a single PK (`id`); agents and group stats use composite PKs `(id, sync_date)` and `(group_id, sync_date)` to preserve daily history
+All writes use `INSERT ... ON CONFLICT DO UPDATE` (PostgreSQL) or `ON DUPLICATE KEY UPDATE`
+(MySQL). Re-running the ETL for the same date is always safe — no duplicate rows and no
+historical data is destroyed.
 
 ---
 
@@ -87,7 +82,8 @@ All writes use `ON CONFLICT DO UPDATE`. This means:
 | httpx | 0.28.x | Sync HTTP client for CloudTalk API |
 | pydantic-settings | 2.7.x | Typed config from env vars |
 | structlog | 25.1.x | Structured JSON logging to stdout |
-| psycopg (v3) | 3.3.x | PostgreSQL driver (Neon, SSL required) |
+| psycopg (v3) | 3.3.x | PostgreSQL driver (default; Neon requires SSL) |
+| mysql-connector-python | 9.x | MySQL driver (optional; install with `.[mysql]`) |
 | tenacity | 9.1.x | Retry logic with exponential backoff |
 | supercronic | 0.2.33 | Cron scheduler inside Docker |
 | Docker base image | `python:3.13-slim-bookworm` | Minimal production image |
@@ -100,10 +96,14 @@ All writes use `ON CONFLICT DO UPDATE`. This means:
 cloudtalk-etl/
 ├── pyproject.toml              # Project metadata + dependencies
 ├── Dockerfile                  # Production container image
-├── docker-compose.yml          # Local development compose
-├── docker-compose.prod.yml     # Production compose (used by Portainer)
+├── docker-compose.yml          # Compose file (dev + Portainer)
 ├── .env.example                # Environment variable template — copy to .env
 ├── .gitattributes              # Forces LF line endings on .sh files (Windows safety)
+│
+├── .schema/                    # Table DDL for the DWH team
+│   ├── call_center_groups.sql
+│   ├── agent_stats.sql
+│   └── call_reasons.sql
 │
 ├── src/cloudtalk_etl/
 │   ├── __main__.py             # Entry point: python -m cloudtalk_etl
@@ -113,116 +113,93 @@ cloudtalk-etl/
 │   │
 │   ├── api/
 │   │   ├── client.py           # CloudTalk HTTP client (auth, retry, pagination)
+│   │   │                       # Handles two base URLs: index (my.cloudtalk.io)
+│   │   │                       # and detail (analytics-api.cloudtalk.io)
 │   │   └── rate_limiter.py     # Token bucket rate limiter (50 req/min)
 │   │
 │   ├── db/
-│   │   ├── connection.py       # Neon PostgreSQL connection (SSL)
-│   │   ├── schema.py           # CREATE TABLE + index DDL; also runs ALTER TABLE
-│   │   │                       # migrations on startup so schema stays up to date
-│   │   └── repositories.py     # Batch upsert functions (calls, agents, groups)
+│   │   ├── backend.py          # Backend selector — reads DB_BACKEND env var
+│   │   ├── connection.py       # PostgreSQL connection (psycopg3, SSL)
+│   │   ├── connection_mysql.py # MySQL connection (mysql-connector-python)
+│   │   ├── schema.py           # PostgreSQL DDL (CREATE TABLE IF NOT EXISTS)
+│   │   ├── schema_mysql.py     # MySQL DDL
+│   │   ├── repositories.py     # PostgreSQL upsert functions (ON CONFLICT)
+│   │   └── repositories_mysql.py # MySQL upsert functions (ON DUPLICATE KEY)
 │   │
 │   └── etl/
-│       ├── extract.py          # Pull data from CloudTalk API with pagination
-│       ├── transform.py        # Flatten + clean raw API responses
-│       └── load.py             # Write to Neon via repositories
+│       ├── extract.py          # Pull call index + details from CloudTalk API
+│       ├── transform.py        # Aggregate raw detail JSON into 3 table shapes
+│       └── load.py             # Write to DB via backend repositories
 │
 ├── scripts/
-│   ├── entrypoint.sh           # Docker entrypoint: starts supercronic or runs once
-│   └── init_db.py              # One-time DB schema initialisation (legacy helper)
+│   └── entrypoint.sh           # Docker entrypoint: starts supercronic or runs once
 │
 └── tests/
-    ├── conftest.py             # Shared fixtures (sample raw call record)
+    ├── conftest.py             # Shared fixtures (sample call detail response)
     ├── test_api_client.py      # HTTP client + pagination (network mocked)
     ├── test_rate_limiter.py    # Token bucket behaviour
     ├── test_repositories.py    # Upsert SQL (DB mocked)
-    └── test_transform.py       # Transform logic + helper functions
+    ├── test_transform.py       # Transform logic, group name parsing, date formatting
+    └── test_etl.py             # Extract pipeline (API mocked)
 ```
 
 ---
 
 ## Database Schema
 
-The database lives on **Neon PostgreSQL**. Tables are created automatically when the
-ETL container first starts — you do not need to run any SQL manually.
+Tables are created automatically when the ETL container first starts — you do not need
+to run any SQL manually. The 3 table DDL files are also available in `.schema/` for the
+DWH team to replicate the structure in an internal database.
 
-Schema migrations (new columns added to existing tables) are also applied automatically
-on each container startup via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` in `schema.py`.
+### `call_center_groups`
 
-### `calls`
-
-One row per call. Primary key is the CloudTalk call ID.
+One row per (date, country, group). Primary key: `(date, country, group_name)`.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | BIGINT PK | CloudTalk call ID |
-| `call_type` | TEXT | `incoming`, `outgoing`, `internal` |
-| `call_status` | TEXT | `answered` or `missed` (derived by ETL) |
-| `call_date` | DATE | Date of the call (derived from `started_at`) |
-| `started_at` | TIMESTAMPTZ | When the call started |
-| `answered_at` | TIMESTAMPTZ | When an agent answered (null if missed) |
-| `ended_at` | TIMESTAMPTZ | When the call ended |
-| `billsec` | INTEGER | Billable seconds (actual talk time) |
-| `talking_time` | INTEGER | Talk time in seconds |
-| `waiting_time` | INTEGER | Time in queue before answer |
-| `wrapup_time` | INTEGER | After-call work time |
-| `agent_id` | TEXT | ID of the agent who handled the call (null = IVR/no agent) |
-| `agent_name` | TEXT | Full name of the agent (null = IVR/no agent) |
-| `user_id` | TEXT | Same as agent_id (raw field from API — prefer `agent_id`) |
-| `public_external` | TEXT | External phone number |
-| `public_internal` | TEXT | Internal extension |
-| `country_code` | TEXT | Country of the external number |
-| `recorded` | BOOLEAN | Whether the call was recorded |
-| `is_voicemail` | BOOLEAN | Whether it went to voicemail |
-| `is_redirected` | BOOLEAN | Whether the call was redirected |
-| `redirected_from` | TEXT | Number it was redirected from |
-| `recording_link` | TEXT | URL to the call recording |
-| `contact_id` | TEXT | CloudTalk contact ID |
-| `contact_name` | TEXT | Contact display name |
-| `contact_company` | TEXT | Contact company name |
-| `synced_at` | TIMESTAMPTZ | When this row was last written by the ETL |
+| `date` | TEXT | Date in `DD.MM.YYYY` format, e.g. `"09.03.2026"` |
+| `country` | TEXT | `"SLO"` or `"CRO"` (parsed from group name suffix) |
+| `group_name` | TEXT | Full queue name, e.g. `"Reklamacije - SLO"` |
+| `category` | TEXT | Parsed category, e.g. `"Reklamacije"` |
+| `total_calls` | INTEGER | Total calls routed to this group |
+| `answered_calls` | INTEGER | Calls answered by an agent |
+| `answered_pct` | NUMERIC(5,2) | `answered / total * 100`, NULL if total = 0 |
+| `unanswered_calls` | INTEGER | Calls not answered (missed/abandoned) |
+| `synced_at` | TIMESTAMPTZ | When this row was last written |
 
-### `agents`
+### `agent_stats`
 
-Daily snapshot — one row per agent per day. Composite PK `(id, sync_date)`.
+One row per (date, country, group, agent). Primary key: `(date, country, group_name, agent_id)`.
+An agent appears in multiple rows if they handle calls in multiple queues.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | TEXT | CloudTalk agent ID |
-| `sync_date` | DATE | Date of the snapshot |
-| `firstname` | TEXT | First name |
-| `lastname` | TEXT | Last name |
-| `fullname` | TEXT | Concatenated full name |
-| `email` | TEXT | Agent email address |
-| `availability_status` | TEXT | Online/offline/away status at time of sync |
-| `extension` | TEXT | Internal extension number |
-| `default_number` | TEXT | Default outbound number |
-| `associated_numbers` | TEXT[] | All numbers associated with this agent |
+| `date` | TEXT | Date in `DD.MM.YYYY` format |
+| `country` | TEXT | `"SLO"` or `"CRO"` |
+| `group_name` | TEXT | Full queue name |
+| `category` | TEXT | Parsed category |
+| `agent_id` | INTEGER | CloudTalk internal agent ID |
+| `agent_name` | TEXT | Agent full name (NULL if unavailable) |
+| `presented_calls` | INTEGER | Times the agent's phone rang (every ring = 1) |
+| `answered_calls` | INTEGER | Calls the agent actually picked up |
+| `talking_time_sec` | INTEGER | Total seconds spent talking (answered calls only) |
+| `synced_at` | TIMESTAMPTZ | When this row was last written |
 
-### `group_stats_daily`
+### `call_reasons`
 
-Daily snapshot of queue/group KPIs. Composite PK `(group_id, sync_date)`.
+One row per (date, country, group, tag). Primary key: `(date, country, group_name, tag_id)`.
+Only calls that have at least one tag are counted.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `group_id` | INTEGER | CloudTalk group ID |
-| `group_name` | TEXT | Group display name |
-| `sync_date` | DATE | Date of the snapshot |
-| `operators` | INTEGER | Number of agents in the group |
-| `answered` | INTEGER | Calls answered |
-| `unanswered` | INTEGER | Calls not answered |
-| `abandon_rate` | REAL | Abandonment rate (0.0–1.0) |
-| `avg_waiting_time` | INTEGER | Average queue wait time (seconds) |
-| `max_waiting_time` | INTEGER | Maximum queue wait time (seconds) |
-| `avg_call_duration` | INTEGER | Average call duration (seconds) |
-| `rt_waiting_queue` | INTEGER | Real-time: calls currently in queue |
-| `rt_avg_waiting_time` | INTEGER | Real-time: average wait time |
-| `rt_max_waiting_time` | INTEGER | Real-time: max wait time |
-| `rt_avg_abandonment_time` | INTEGER | Real-time: average abandonment time |
-
-### `call_intelligence` (Phase 2 — not yet populated)
-
-Linked to `calls` via FK. Will hold AI transcription, sentiment, topics, and smart notes
-from CloudTalk's Conversation Intelligence API when that phase is implemented.
+| `date` | TEXT | Date in `DD.MM.YYYY` format |
+| `country` | TEXT | `"SLO"` or `"CRO"` |
+| `group_name` | TEXT | Full queue name |
+| `category` | TEXT | Parsed category |
+| `tag_id` | INTEGER | CloudTalk internal tag ID |
+| `tag_name` | TEXT | Tag label text (NULL if unavailable) |
+| `call_count` | INTEGER | Number of calls with this tag in this group on this date |
+| `synced_at` | TIMESTAMPTZ | When this row was last written |
 
 ---
 
@@ -234,13 +211,75 @@ Copy `.env.example` to `.env` and fill in the required values.
 |----------|----------|---------|-------------|
 | `CLOUDTALK_API_KEY_ID` | ✅ | — | CloudTalk API key ID. Generate in CloudTalk → Settings → API |
 | `CLOUDTALK_API_KEY_SECRET` | ✅ | — | CloudTalk API key secret |
-| `DATABASE_URL` | ✅ | — | Full Neon connection string. Must include `sslmode=require`. Get it from Neon console → Connection Details → Connection string |
-| `CRON_SCHEDULE` | — | `0 2 * * *` | When the ETL runs (cron syntax). Default = 02:00 every night. Consumed by Docker/supercronic, not Python |
-| `LOG_LEVEL` | — | `INFO` | Log verbosity. `DEBUG` for verbose, `INFO` for normal, `WARNING` for quiet |
-| `RATE_LIMIT_RPM` | — | `50` | API requests per minute. CloudTalk's limit is 60 — keep this at 50 or below |
+| `DATABASE_URL` | ✅ | — | PostgreSQL: full Neon connection string incl. `?sslmode=require`. MySQL: `mysql://user:pass@host:3306/dbname` |
+| `DB_BACKEND` | — | `postgresql` | `"postgresql"` or `"mysql"` — selects the database driver |
+| `CRON_SCHEDULE` | — | `0 2 * * *` | When the ETL runs (cron syntax). Default = 02:00 every night |
+| `LOG_LEVEL` | — | `INFO` | Log verbosity: `DEBUG`, `INFO`, or `WARNING` |
+| `RATE_LIMIT_RPM` | — | `50` | API requests per minute. CloudTalk's limit is 60 — keep this ≤ 50 |
 | `ETL_DATE_OVERRIDE` | — | yesterday | Force a specific sync date in `YYYY-MM-DD` format. Used for backfills |
-| `TEST_MODE` | — | `false` | If `true`, fetches only the first page (10 records) from each endpoint. Use for smoke tests |
-| `TZ` | — | — | Timezone for the cron schedule. Set to `Europe/Ljubljana` in both compose files |
+| `TEST_MODE` | — | `false` | If `true`, fetches the full call index but samples only `TEST_SAMPLE_SIZE` call details |
+| `TEST_SAMPLE_SIZE` | — | `50` | Number of call details to fetch when `TEST_MODE=true` |
+| `TZ` | — | — | Timezone for the cron schedule. Set to `Europe/Ljubljana` in the compose file |
+
+---
+
+## Database Backend — PostgreSQL vs MySQL
+
+The ETL supports both PostgreSQL (default) and MySQL 8.0+. The backend is selected at
+runtime via the `DB_BACKEND` environment variable — no code changes needed.
+
+### Side-by-side comparison
+
+| Setting | PostgreSQL (Neon) | MySQL |
+|---------|-------------------|-------|
+| `DB_BACKEND` | `postgresql` | `mysql` |
+| `DATABASE_URL` | `postgresql://user:pass@ep-xxx.neon.tech/neondb?sslmode=require` | `mysql://user:pass@db.host.com:3306/cloudtalk` |
+| Docker build | `docker build -t cloudtalk-etl .` | `docker build --build-arg INSTALL_TARGET='.[mysql]' -t cloudtalk-etl .` |
+| compose `build:` | `build: .` | uncomment the `build: context/args` block in `docker-compose.yml` |
+
+### Using PostgreSQL (default — Neon)
+
+Set these in your `.env` or Portainer stack environment:
+
+```env
+DB_BACKEND=postgresql
+DATABASE_URL=postgresql://neondb_owner:YOUR_PASSWORD@ep-xxx.eu-central-1.aws.neon.tech/neondb?sslmode=require
+```
+
+Build normally:
+```bash
+docker build -t cloudtalk-etl .
+```
+
+### Using MySQL
+
+Set these in your `.env` or Portainer stack environment:
+
+```env
+DB_BACKEND=mysql
+DATABASE_URL=mysql://cloudtalk_user:YOUR_PASSWORD@your-db-host.com:3306/cloudtalk_analytics
+```
+
+The MySQL driver (`mysql-connector-python`) is an optional dependency — not included in the
+default image. Build with the `mysql` extra:
+
+```bash
+docker build --build-arg INSTALL_TARGET='.[mysql]' -t cloudtalk-etl .
+```
+
+In `docker-compose.yml`, replace `build: .` with the commented MySQL build block:
+
+```yaml
+build:
+  context: .
+  args:
+    INSTALL_TARGET: ".[mysql]"
+```
+
+To disable SSL for a local MySQL instance (dev only), append `?ssl_disabled=true`:
+```env
+DATABASE_URL=mysql://root:secret@localhost:3306/cloudtalk?ssl_disabled=true
+```
 
 ---
 
@@ -249,7 +288,7 @@ Copy `.env.example` to `.env` and fill in the required values.
 ### Prerequisites
 
 - Python 3.13
-- Access to the Neon PostgreSQL database (get the connection string from the Neon console)
+- Access to the database (Neon connection string, or a local MySQL instance)
 - CloudTalk API credentials (Settings → API in the CloudTalk admin)
 
 ### 1. Clone the repository
@@ -266,6 +305,9 @@ cd cloudtalk-analytics-etl
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
+
+# With MySQL support:
+pip install -e ".[dev,mysql]"
 ```
 
 ```bash
@@ -283,18 +325,19 @@ cp .env.example .env
 #   CLOUDTALK_API_KEY_ID
 #   CLOUDTALK_API_KEY_SECRET
 #   DATABASE_URL
+#   DB_BACKEND   (optional, defaults to postgresql)
 ```
 
 ### 4. Run the ETL
 
 ```bash
-# Full run — syncs yesterday's data into Neon
+# Full run — syncs yesterday's data
 python -m cloudtalk_etl
 
-# Test run — fetches only 10 records per endpoint (no DB writes skipped, just less data)
+# Test run — fetches full call index but only 50 call details
 TEST_MODE=true python -m cloudtalk_etl
 
-# Sync a specific date (useful for backfills or re-runs)
+# Sync a specific date
 ETL_DATE_OVERRIDE=2026-03-03 python -m cloudtalk_etl
 ```
 
@@ -309,11 +352,10 @@ are mocked.
 python -m pytest tests/ -v
 ```
 
-Expected output: **73 tests, all passing**.
-
-To run a specific test file:
+Expected output: **92 tests, all passing**.
 
 ```bash
+# Run a specific test file
 python -m pytest tests/test_transform.py -v
 ```
 
@@ -324,29 +366,33 @@ python -m pytest tests/test_transform.py -v
 ### How the container works
 
 1. The container starts and runs `entrypoint.sh`
-2. The entrypoint writes a crontab to `/tmp/crontab` using the `CRON_SCHEDULE` env var
-3. `supercronic` reads the crontab and runs `python -m cloudtalk_etl` on schedule
-4. Each run logs structured JSON to stdout (visible in Portainer logs)
-5. Docker's `init: true` (tini) is set in both compose files — this is required so
-   supercronic does not run as PID 1, which causes it to crash in slim containers
+2. `entrypoint.sh` logs the build timestamp (baked in at image build time) so you can verify which version is running in Portainer
+3. The entrypoint writes a crontab to `/tmp/crontab` using the `CRON_SCHEDULE` env var
+4. `supercronic` reads the crontab and runs `python -m cloudtalk_etl` on schedule
+5. Each run logs structured JSON to stdout (visible in Portainer logs)
+6. Docker's `init: true` (tini) is set — this is required so supercronic does not run as PID 1
 
-### Building the image locally (Linux/WSL)
+### Building the image
 
 ```bash
+# PostgreSQL (default)
 docker build -t cloudtalk-etl .
+
+# MySQL
+docker build --build-arg INSTALL_TARGET='.[mysql]' -t cloudtalk-etl .
 ```
 
-### Running once manually (Linux/WSL)
+### Running once manually (from WSL/Linux)
 
 ```bash
 # Sync yesterday's data
-docker run --rm --env-file .env -e TZ=Europe/Ljubljana cloudtalk-etl run
+docker run --rm --env-file .env cloudtalk-etl run
 
 # Sync a specific date
-docker run --rm --env-file .env -e TZ=Europe/Ljubljana -e ETL_DATE_OVERRIDE=2026-03-03 cloudtalk-etl run
+docker run --rm --env-file .env -e ETL_DATE_OVERRIDE=2026-03-03 cloudtalk-etl run
 
-# Test mode (10 records only)
-docker run --rm --env-file .env -e TZ=Europe/Ljubljana -e TEST_MODE=true cloudtalk-etl run
+# Test mode
+docker run --rm --env-file .env -e TEST_MODE=true cloudtalk-etl run
 ```
 
 ### Deploying to Portainer (first time)
@@ -356,20 +402,18 @@ docker run --rm --env-file .env -e TZ=Europe/Ljubljana -e TEST_MODE=true cloudta
 3. Select **Repository** as the build method
 4. Set:
    - Repository URL: `https://github.com/nejcpetan/cloudtalk-analytics-etl`
-   - Compose path: `docker-compose.prod.yml`
-5. Add all required environment variables (see table above)
+   - Compose path: `docker-compose.yml`
+5. Add all required environment variables in the Portainer stack environment settings
 6. Click **Deploy the stack**
-
-The container will start, connect to Neon, apply any pending schema migrations, and
-then wait for the next scheduled run.
 
 ### Redeploying after a code change
 
 1. `git push` the changes
 2. In Portainer → **Stacks** → `cloudtalk-etl` → **Pull and redeploy**
 
-Portainer will rebuild the image from the latest commit and restart the container.
-The new schema migrations (if any) will be applied automatically on startup.
+If you changed dependencies or the Dockerfile, you must also delete the old image in
+Portainer (Images → delete `cloudtalk-etl`) before redeploying, otherwise the old
+cached image will be used.
 
 ---
 
@@ -379,31 +423,36 @@ The new schema migrations (if any) will be applied automatically on startup.
 
 Portainer → **Containers** → `cloudtalk-etl` → **Logs**
 
+The container logs the build timestamp at startup so you can confirm the right version
+is deployed:
+
+```
+CloudTalk ETL Service starting...
+Built: 2026-03-10 08:34 UTC
+Schedule: 0 2 * * *
+Log level: INFO
+```
+
 Each ETL run produces structured JSON log lines. A successful run looks like:
 
 ```json
-{"event": "etl_started",       "sync_date": "2026-03-04", ...}
-{"event": "database_connected", ...}
-{"event": "schema_ensured",    ...}
-{"event": "calls_extracted",   "count": 724, ...}
-{"event": "calls_transformed", "count": 724, ...}
-{"event": "calls_upserted",    "count": 500, ...}
-{"event": "calls_upserted",    "count": 224, ...}
-{"event": "agents_extracted",  "count": 42, ...}
-{"event": "agents_upserted",   "count": 42, ...}
-{"event": "group_stats_upserted", "count": 7, ...}
-{"event": "etl_completed",     "sync_date": "2026-03-04", "calls_synced": 724, "duration_seconds": 2.93, ...}
+{"event": "etl_started",                    "sync_date": "2026-03-09", "test_mode": false}
+{"event": "database_connected",              "server": "ep-xxx.neon.tech"}
+{"event": "schema_ensured"}
+{"event": "calls_extracted",                "count": 724}
+{"event": "extracting_call_details",        "total": 724}
+{"event": "call_details_extracted",         "fetched": 720, "skipped": 4}
+{"event": "upserted_call_center_groups",    "count": 6}
+{"event": "upserted_agent_stats",           "count": 48}
+{"event": "upserted_call_reasons",          "count": 23}
+{"event": "etl_completed",                  "sync_date": "2026-03-09", "call_center_groups_synced": 6, "agent_stats_synced": 48, "call_reasons_synced": 23, "duration_seconds": 847.2}
 ```
 
-### Triggering a manual run without restarting the container
+> Note: fetching ~700 call details at 1050ms each takes ~12 minutes. This is expected.
 
-In Portainer → **Containers** → `cloudtalk-etl` → **Exec** → open a console, then:
+### Triggering a manual run
 
-```bash
-python -m cloudtalk_etl
-```
-
-Or from a machine that has Docker access:
+From Portainer → **Containers** → `cloudtalk-etl` → **Exec**, or via Docker:
 
 ```bash
 docker exec cloudtalk-etl python -m cloudtalk_etl
@@ -411,34 +460,36 @@ docker exec cloudtalk-etl python -m cloudtalk_etl
 
 ### Checking what's in the database
 
-Connect to Neon via the Neon console SQL editor or any PostgreSQL client using the
-`DATABASE_URL`. Useful queries:
+Connect to Neon via the Neon console SQL editor or any PostgreSQL client.
 
 ```sql
--- How many calls per day?
-SELECT call_date, COUNT(*) FROM calls GROUP BY call_date ORDER BY call_date DESC;
+-- Which groups ran today?
+SELECT date, country, group_name, total_calls, answered_calls, answered_pct
+FROM call_center_groups
+WHERE date = '09.03.2026'
+ORDER BY country, group_name;
 
--- Calls per agent for a specific day
-SELECT agent_name, COUNT(*) AS calls
-FROM calls
-WHERE call_date = '2026-03-04' AND agent_id IS NOT NULL
-GROUP BY agent_name
-ORDER BY calls DESC;
+-- Top agents by answered calls for a date
+SELECT agent_name, group_name, answered_calls, talking_time_sec
+FROM agent_stats
+WHERE date = '09.03.2026'
+ORDER BY answered_calls DESC;
 
--- Calls with no agent (IVR/abandoned)
-SELECT COUNT(*) FROM calls WHERE agent_id IS NULL;
+-- Call reasons breakdown
+SELECT group_name, tag_name, call_count
+FROM call_reasons
+WHERE date = '09.03.2026'
+ORDER BY group_name, call_count DESC;
 
--- Latest sync timestamps
-SELECT MAX(synced_at) FROM calls;
-SELECT MAX(synced_at) FROM agents;
+-- Latest sync check
+SELECT MAX(synced_at) FROM call_center_groups;
 ```
 
 ---
 
 ## Backfilling Historical Data
 
-If you need to (re-)sync data for a date range — for example after a bug fix or a
-missed run — use `ETL_DATE_OVERRIDE` in a loop from WSL or Linux:
+Use `ETL_DATE_OVERRIDE` in a loop to re-sync a date range:
 
 ```bash
 for date in 2026-03-01 2026-03-02 2026-03-03; do
@@ -452,76 +503,61 @@ done
 
 Each run is idempotent — running it twice for the same date is safe.
 
+> Be aware: each day takes ~12 minutes due to the per-call detail throttle.
+> A 7-day backfill takes approximately 90 minutes.
+
 ---
 
 ## Troubleshooting
 
 ### Container exits immediately / supercronic crash
 
-**Symptom:** Container shows `Failed to fork exec: no such file or directory` or exits
-right after starting.
+**Symptom:** Container exits right after starting.
 
-**Cause:** `supercronic` crashes when it runs as PID 1 in a slim container because it
-tries to act as a zombie reaper and fails.
+**Cause:** `supercronic` crashes when run as PID 1 in a slim container.
 
-**Fix:** Both compose files have `init: true` which injects Docker's `tini` as PID 1.
-Make sure this is present in the compose file being used.
+**Fix:** The compose file has `init: true` which injects Docker's `tini` as PID 1.
+Make sure this is present in the compose file.
 
 ### CRLF line ending errors in entrypoint.sh
 
-**Symptom:** Container fails with `/entrypoint.sh: not found` or similar.
+**Symptom:** Container fails with `/entrypoint.sh: not found`.
 
-**Cause:** Git on Windows may have committed the shell script with Windows CRLF
-(`\r\n`) line endings. Bash does not understand these.
+**Cause:** Git on Windows may have committed the shell script with CRLF line endings.
 
 **Fix:** The Dockerfile strips CRLF at build time (`sed -i 's/\r$//' /entrypoint.sh`).
-The `.gitattributes` file forces LF in the repo for all `.sh` files. If you're seeing
-this, check that `.gitattributes` is committed and pull the latest image.
+The `.gitattributes` file forces LF for `.sh` files going forward.
 
 ### ETL fails with authentication error (401)
 
 **Cause:** `CLOUDTALK_API_KEY_ID` or `CLOUDTALK_API_KEY_SECRET` is wrong or expired.
 
 **Fix:** Regenerate the API key in CloudTalk → Settings → API and update the env var
-in Portainer (redeploy the stack after updating).
+in Portainer, then redeploy.
 
 ### ETL fails with database connection error
 
-**Cause:** `DATABASE_URL` is missing, malformed, or the Neon database is paused/deleted.
+**Cause:** `DATABASE_URL` is missing, malformed, or the Neon project is paused.
 
-**Fix:** Check the URL in Portainer matches exactly what Neon shows in Connection
-Details. The URL must include `?sslmode=require` at the end.
+**Fix (PostgreSQL):** The URL must include `?sslmode=require`.
+
+**Fix (MySQL):** Check that the host, port, user, password, and database name are correct.
+Append `?ssl_disabled=true` if connecting to a local MySQL without SSL.
 
 ### A day of data is missing
 
-**Cause:** The container was down during the 02:00 run, or the ETL failed.
+**Cause:** The container was down during the 02:00 run, or the ETL failed partway through.
 
-**Fix:** Trigger a manual backfill run with `ETL_DATE_OVERRIDE=YYYY-MM-DD` (see
-Backfilling section above). Check Portainer logs for the failure reason.
+**Fix:** Trigger a manual backfill run with `ETL_DATE_OVERRIDE=YYYY-MM-DD`.
+Check Portainer logs for the failure reason.
 
-### Calls show `agent_id = NULL` unexpectedly
+### Some groups are missing from the output
 
-**Cause:** These are genuinely unassigned calls — the caller interacted with the IVR
-but no human agent ever picked up. CloudTalk itself does not assign an agent to these.
-Average `billsec` for these calls is ~46 seconds vs ~240 seconds for agent-handled calls.
-This is expected and not a data problem.
+**Cause:** Only groups matching the `"Category - SLO"` / `"Category - CRO"` naming format
+are included. Phone line groups `(SLO) Name` and any other format are filtered out.
 
----
-
-## Future Work
-
-### Phase 2 — Conversation Intelligence
-
-The `call_intelligence` table is already created in the schema (but not populated).
-When CloudTalk's `enable_conversation_intelligence` flag is enabled on the account,
-this phase would:
-
-1. After each call is synced, check if a transcription is available
-2. Fetch the transcript, sentiment, topics, and smart notes from the CloudTalk API
-3. Store them in `call_intelligence` (FK → `calls.id`)
-
-The config setting `ENABLE_CONVERSATION_INTELLIGENCE=true` is already wired into
-`config.py` — it just needs the extract/transform/load implementation.
+**Cause 2:** The call detail fetch for those calls may have failed (network error). Check
+logs for `call_detail_fetch_failed` entries.
 
 ---
 

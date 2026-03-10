@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     cloudtalk_analytics_api_base_url: str = "https://analytics-api.cloudtalk.io/api"
 
     # Database
-    database_url: str  # Full Neon connection string with sslmode=require
+    database_url: str              # postgresql:// or mysql:// connection string
+    db_backend: str = "postgresql" # "postgresql" (default) or "mysql"
 
     # ETL Settings
     rate_limit_rpm: int = Field(default=50, ge=1, le=55)
