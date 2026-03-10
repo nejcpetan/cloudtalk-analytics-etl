@@ -87,7 +87,9 @@ def run_etl() -> None:
         if "calls_index" not in failed_stages and raw_calls:
             try:
                 call_details = extract_call_details(
-                    api_client, raw_calls, test_mode=settings.test_mode
+                    api_client, raw_calls,
+                    test_mode=settings.test_mode,
+                    sample_size=settings.test_sample_size,
                 )
             except Exception:
                 logger.exception("stage_failed", stage="call_details", sync_date=str(sync_date))

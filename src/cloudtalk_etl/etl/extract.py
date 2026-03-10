@@ -1,3 +1,4 @@
+import random
 import time
 import structlog
 from datetime import date
@@ -16,21 +17,20 @@ def extract_calls(client: CloudTalkClient, sync_date: date,
     Extract all calls for a given date from the index endpoint.
 
     Uses date_from (start of day) and date_to (end of day) filters.
-    Handles pagination automatically.
+    Handles pagination automatically. Always fetches the full index —
+    sampling is applied downstream in extract_call_details.
     """
     date_from = f"{sync_date} 00:00:00"
     date_to = f"{sync_date} 23:59:59"
-    limit = 10 if test_mode else 1000
 
     logger.info("extracting_calls", date_from=date_from, date_to=date_to,
                 test_mode=test_mode)
 
     calls = client.get_all_pages(
         client.get_calls,
-        max_pages=1 if test_mode else None,
         date_from=date_from,
         date_to=date_to,
-        limit=limit,
+        limit=1000,
     )
 
     logger.info("calls_extracted", count=len(calls))
@@ -38,7 +38,8 @@ def extract_calls(client: CloudTalkClient, sync_date: date,
 
 
 def extract_call_details(client: CloudTalkClient, raw_calls: list[dict],
-                         test_mode: bool = False) -> dict[int, dict]:
+                         test_mode: bool = False,
+                         sample_size: int = 50) -> dict[int, dict]:
     """
     Fetch detailed call data for each call from the analytics API.
 
@@ -48,9 +49,10 @@ def extract_call_details(client: CloudTalkClient, raw_calls: list[dict],
     simply be missing that call_id.
 
     Args:
-        client:     CloudTalk API client.
-        raw_calls:  Raw call index records (each has a Cdr.id field).
-        test_mode:  If True, fetch only the first 10 call details.
+        client:      CloudTalk API client.
+        raw_calls:   Raw call index records (each has a Cdr.id field).
+        test_mode:   If True, fetch only a random sample of call details.
+        sample_size: Number of calls to sample in test_mode (default 50).
 
     Returns:
         Dict mapping call_id (int) -> detail response dict.
@@ -66,7 +68,7 @@ def extract_call_details(client: CloudTalkClient, raw_calls: list[dict],
                 pass
 
     if test_mode:
-        call_ids = call_ids[:10]
+        call_ids = random.sample(call_ids, min(sample_size, len(call_ids)))
 
     logger.info("extracting_call_details", total=len(call_ids))
 

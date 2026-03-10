@@ -62,14 +62,14 @@ def test_extract_call_details_skips_failed_calls(sample_call_detail_answered):
 
 
 def test_extract_call_details_respects_test_mode(sample_call_detail_answered):
-    """In test_mode, only first 10 call IDs should be fetched."""
+    """In test_mode, only sample_size call IDs should be fetched (random sample)."""
     client = MagicMock()
     client.get_call_detail.return_value = sample_call_detail_answered
 
-    raw_calls = _make_raw_calls(list(range(100001, 100021)))  # 20 calls
+    raw_calls = _make_raw_calls(list(range(100001, 100101)))  # 100 calls
 
     with patch("cloudtalk_etl.etl.extract.time.sleep"):
-        result = extract_call_details(client, raw_calls, test_mode=True)
+        result = extract_call_details(client, raw_calls, test_mode=True, sample_size=10)
 
     assert client.get_call_detail.call_count == 10
     assert len(result) == 10

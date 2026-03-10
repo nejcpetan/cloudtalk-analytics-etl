@@ -64,14 +64,6 @@ def parse_group_name(group_name: str) -> tuple[str, str]:
         if suffix in _KNOWN_COUNTRIES:
             return (suffix, group_name[:idx].strip())
 
-    # Format: "(COUNTRY) Category"
-    if group_name.startswith("("):
-        close = group_name.find(")")
-        if close != -1:
-            country = group_name[1:close].strip()
-            if country in _KNOWN_COUNTRIES:
-                return (country, group_name[close + 1:].strip())
-
     logger.warning("group_name_parse_failed", group_name=group_name)
     return ("UNKNOWN", group_name)
 
@@ -144,6 +136,8 @@ def transform_call_center_groups(
     result = []
     for group_name, data in buckets.items():
         country, category = parse_group_name(group_name)
+        if country == "UNKNOWN":
+            continue
         total = data["total"]
         answered = data["answered"]
         answered_pct = round(answered / total * 100, 2) if total > 0 else None
@@ -220,6 +214,8 @@ def transform_agent_stats(
     result = []
     for (group_name, agent_id), data in buckets.items():
         country, category = parse_group_name(group_name)
+        if country == "UNKNOWN":
+            continue
         result.append({
             "date": date_str,
             "country": country,
@@ -281,6 +277,8 @@ def transform_call_reasons(
     result = []
     for (group_name, tag_id), data in buckets.items():
         country, category = parse_group_name(group_name)
+        if country == "UNKNOWN":
+            continue
         result.append({
             "date": date_str,
             "country": country,

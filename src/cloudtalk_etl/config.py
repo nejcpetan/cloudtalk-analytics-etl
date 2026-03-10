@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     rate_limit_rpm: int = Field(default=50, ge=1, le=55)
     log_level: str = "INFO"
     etl_date_override: str | None = None  # YYYY-MM-DD format, None = yesterday
-    test_mode: bool = False  # Fetch only 1 page / 10 records per endpoint for quick dry runs
+    test_mode: bool = False  # Fetch only 1 page / sample of records per endpoint for quick dry runs
+    test_sample_size: int = 50  # Number of call details to fetch in test_mode
 
     # Retry settings
     max_retries: int = 5

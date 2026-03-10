@@ -111,16 +111,15 @@ def test_parse_group_name_multi_word_category():
     assert category == "Svetovanje pri prodaji"
 
 
-def test_parse_group_name_parenthesis_prefix_slo():
-    country, category = parse_group_name("(SLO) Contact Center Number")
-    assert country == "SLO"
-    assert category == "Contact Center Number"
+def test_parse_group_name_parenthesis_prefix_returns_unknown():
+    """Parenthesis format like '(SLO) Contact Center Number' is a phone line, not a queue."""
+    country, _ = parse_group_name("(SLO) Contact Center Number")
+    assert country == "UNKNOWN"
 
 
-def test_parse_group_name_parenthesis_prefix_cro():
-    country, category = parse_group_name("(CRO) Contact Center Number")
-    assert country == "CRO"
-    assert category == "Contact Center Number"
+def test_parse_group_name_parenthesis_prefix_cro_returns_unknown():
+    country, _ = parse_group_name("(CRO) Contact Center Number")
+    assert country == "UNKNOWN"
 
 
 def test_parse_group_name_no_delimiter_returns_unknown():
