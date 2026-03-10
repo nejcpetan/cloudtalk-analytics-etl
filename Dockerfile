@@ -29,18 +29,8 @@ COPY scripts/entrypoint.sh /entrypoint.sh
 # Strip Windows CRLF line endings (if committed from Windows) and make executable
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
-# Bake git commit + build timestamp into image so they appear in logs automatically.
-# Reads from .git/ which is present whether building locally or from Portainer git clone.
-COPY .git/HEAD .git/HEAD
-COPY .git/refs/ .git/refs/
-RUN date -u +"%Y-%m-%d %H:%M UTC" > /app/built_at.txt \
-    && if grep -q "^ref:" .git/HEAD; then \
-         REF=$(awk '{print $2}' .git/HEAD); \
-         cut -c1-7 ".git/$REF" > /app/git_commit.txt 2>/dev/null || echo "unknown" > /app/git_commit.txt; \
-       else \
-         cut -c1-7 .git/HEAD > /app/git_commit.txt; \
-       fi \
-    && rm -rf .git/
+# Bake build timestamp into the image — shows in logs so you can verify deployment date.
+RUN date -u +"%Y-%m-%d %H:%M UTC" > /app/built_at.txt
 
 # Create log directory
 RUN mkdir -p /app/logs && chown etl:etl /app/logs
