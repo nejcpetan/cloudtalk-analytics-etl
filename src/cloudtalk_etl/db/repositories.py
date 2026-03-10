@@ -43,6 +43,7 @@ def upsert_calls(conn: psycopg.Connection, calls: list[dict]) -> int:
             public_external = EXCLUDED.public_external,
             public_internal = EXCLUDED.public_internal,
             recorded = EXCLUDED.recorded,
+            user_id = EXCLUDED.user_id,
             answered_at = EXCLUDED.answered_at,
             ended_at = EXCLUDED.ended_at,
             call_status = EXCLUDED.call_status,
